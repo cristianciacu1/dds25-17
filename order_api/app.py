@@ -19,14 +19,14 @@ GATEWAY_URL = os.environ["GATEWAY_URL"]
 app = Flask("order-api")
 
 
-
 class OrderValue(Struct):
     paid: bool
     items: list[tuple[str, int]]
     user_id: str
     total_cost: int
 
-@app.post('/create/<user_id>')
+
+@app.post("/create/<user_id>")
 def create_order(user_id: str):
     key = str(uuid.uuid4())
     value = msgpack.encode(
