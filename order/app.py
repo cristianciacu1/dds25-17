@@ -70,7 +70,6 @@ def create_order(user_id: str):
 
 @app.post("/batch_init/<n>/<n_items>/<n_users>/<item_price>")
 def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
-
     n = int(n)
     n_items = int(n_items)
     n_users = int(n_users)
