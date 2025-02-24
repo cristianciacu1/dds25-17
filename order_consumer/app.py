@@ -4,26 +4,9 @@ import atexit
 import random
 import uuid
 from collections import defaultdict
-
+import redis
 import pika
-
 from msgspec import msgpack, Struct
-from flask import Flask, jsonify, abort, Response
-from utils import (
-    create_order_db,
-    get_order_from_db,
-    batch_init_users_db,
-    add_item_db,
-    checkout_db,
-)
-
-# insert RabbitMQ consumer
-
-
-DB_ERROR_STR = "DB error"
-REQ_ERROR_STR = "Requests error"
-
-GATEWAY_URL = os.environ["GATEWAY_URL"]
 
 
 db: redis.Redis = redis.Redis(
@@ -48,17 +31,51 @@ class OrderValue(Struct):
     total_cost: int
 
 
+class OrderConsumer:
+    def __init__(self):
+        # Establish connection to RabbitMQ
+        self.connection = pika.BlockingConnection(
+            pika.URLParameters(os.environ["RABBITMQ_URL"])
+        )
+        self.channel = self.connection.channel()
+
+        # Declare the queue
+        self.channel.queue_declare(queue="order_queue")
+
+        print("OrderConsumer is ready. Waiting for messages...")
+
+    def callback(self, ch, method, properties, body):
+        """Processes request and sends response back."""
+        msg = msgpack.decode(body)
+
+        if msg["function"] == "create_order":
+            key = create_order_db(msg["user_id"])
+            self.publish_reply(properties, {"status": 200, "order_id": key})
+
+    def start(self):
+        """Starts consuming messages from RabbitMQ."""
+        self.channel.basic_consume(
+            queue="order_queue", on_message_callback=self.callback
+        )
+        self.channel.start_consuming()
+
+    def publish_reply(self, properties, response):
+        self.channel.basic_publish(
+            exchange="",
+            routing_key=properties.reply_to,  # Reply to the original sender
+            properties=pika.BasicProperties(correlation_id=properties.correlation_id),
+            body=msgpack.encode(response),
+        )
+
+
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
         # get serialized data
         entry: bytes = db.get(order_id)
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        raise Exception
     # deserialize data if it exists else return null
     entry: OrderValue | None = msgpack.decode(entry, type=OrderValue) if entry else None
-    if entry is None:
-        # if order does not exist in the database; abort
-        abort(400, f"Order: {order_id} not found!")
     return entry
 
 
@@ -70,8 +87,8 @@ def create_order_db(user_id: str):
     try:
         db.set(key, value)
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return jsonify({"order_id": key})
+        raise Exception
+    return key
 
 
 def batch_init_users_db(n: int, n_items: int, n_users: int, item_price: int):
@@ -99,49 +116,27 @@ def batch_init_users_db(n: int, n_items: int, n_users: int, item_price: int):
     try:
         db.mset(kv_pairs)
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return jsonify({"msg": "Batch init for orders successful"})
+        raise Exception
 
 
 def find_order_db(order_id: str):
-    order_entry: OrderValue = get_order_from_db(order_id)
-    return jsonify(
-        {
-            "order_id": order_id,
-            "paid": order_entry.paid,
-            "items": order_entry.items,
-            "user_id": order_entry.user_id,
-            "total_cost": order_entry.total_cost,
-        }
-    )
+    return get_order_from_db(order_id)
 
 
-def add_item_db(order_id: str, item_id: str, item_json: dict, quantity: int):
-    order_entry: OrderValue = get_order_from_db(order_id)
-    order_entry.items.append((item_id, int(quantity)))
-    order_entry.total_cost += int(quantity) * item_json["price"]
+def add_item_db(order_id: str, order_entry: OrderValue):
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(
-        f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
-        status=200,
-    )
+        raise Exception
 
 
-def checkout(order_id: str, order_entry: OrderValue):
+def checkout_db(order_id: str, order_entry: OrderValue):
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    app.logger.debug("Checkout successful")
-    return Response("Checkout successful", status=200)
+        raise Exception
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
-else:
-    gunicorn_logger = logging.getLogger("gunicorn.error")
-    app.logger.handlers = gunicorn_logger.handlers
-    app.logger.setLevel(gunicorn_logger.level)
+    consumer = OrderConsumer()
+    consumer.start()

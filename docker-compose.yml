@@ -3,13 +3,18 @@ services:
 
   rabbitmq:
     image: rabbitmq:3-management
-    container_name: rabbitmq
     ports:
       - '5672:5672'
       - '15672:15672'
     environment:
+      AMQP_URL: 'amqp://rabbitmq?connection_attempts=5&retry_delay=5'
       RABBITMQ_DEFAULT_USER: guest
       RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics check_port_connectivity
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
   gateway:
     image: nginx:1.25-bookworm
@@ -28,13 +33,12 @@ services:
   order-api:
     build: ./order_api
     image: order-api:latest
-    environment:
-      - GATEWAY_URL=http://gateway:80
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
-      - env/order_redis.env
+      - env/api.env
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
   
   order-consumer:
     build: ./order_consumer
@@ -45,8 +49,10 @@ services:
     env_file:
       - env/order_redis.env
     depends_on:
-      - order-db
-      - rabbitmq
+      order-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   order-db:
     image: redis:7.2-bookworm
@@ -57,9 +63,10 @@ services:
     image: stock-api:latest
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
-      - env/stock_redis.env
+      - env/api.env
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
   
   stock-consumer:
     build: ./stock_consumer
@@ -70,8 +77,10 @@ services:
     env_file:
       - env/stock_redis.env
     depends_on:
-      - stock-db
-      - rabbitmq
+      stock-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   stock-db:
     image: redis:7.2-bookworm
@@ -82,9 +91,10 @@ services:
     image:  payment-api:latest
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
-      - env/payment_redis.env
+      - env/api.env
     depends_on:
-      - rabbitmq
+      rabbitmq:
+        condition: service_healthy
   
   payment-consumer:
     build: ./payment_consumer
@@ -95,8 +105,10 @@ services:
     env_file:
       - env/payment_redis.env
     depends_on:
-      - payment-db
-      - rabbitmq
+      payment-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   payment-db:
     image: redis:7.2-bookworm
