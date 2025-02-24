@@ -1,6 +1,16 @@
 version: "3"
 services:
 
+  rabbitmq:
+    image: rabbitmq:3-management
+    container_name: rabbitmq
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+
   gateway:
     image: nginx:1.25-bookworm
     volumes:
@@ -8,46 +18,85 @@ services:
     ports:
       - "8000:80"
     depends_on:
-      - order-service
-      - stock-service
-      - payment-service
+      - order-api
+      - stock-api
+      - payment-api
+      - order-consumer
+      - stock-consumer
+      - payment-consumer
 
-  order-service:
-    build: ./order
-    image: order:latest
+  order-api:
+    build: ./order_api
+    image: order-api:latest
     environment:
       - GATEWAY_URL=http://gateway:80
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
     depends_on:
+      - rabbitmq
+  
+  order-consumer:
+    build: ./order_consumer
+    image: order-consumer:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+    command: sh -c "python app.py"
+    env_file:
+      - env/order_redis.env
+    depends_on:
       - order-db
+      - rabbitmq
 
   order-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
 
-  stock-service:
-    build: ./stock
-    image: stock:latest
+  stock-api:
+    build: ./stock_api
+    image: stock-api:latest
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
     depends_on:
+      - rabbitmq
+  
+  stock-consumer:
+    build: ./stock_consumer
+    image: stock-consumer:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+    command: sh -c "python app.py"
+    env_file:
+      - env/stock_redis.env
+    depends_on:
       - stock-db
+      - rabbitmq
 
   stock-db:
     image: redis:7.2-bookworm
     command: redis-server --requirepass redis --maxmemory 512mb
 
-  payment-service:
-    build: ./payment
-    image: user:latest
+  payment-api:
+    build: ./payment_api
+    image:  payment-api:latest
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
     depends_on:
+      - rabbitmq
+  
+  payment-consumer:
+    build: ./payment_consumer
+    image: payment-consumer:latest
+    environment:
+      - GATEWAY_URL=http://gateway:80
+    command: sh -c "python app.py"
+    env_file:
+      - env/payment_redis.env
+    depends_on:
       - payment-db
+      - rabbitmq
 
   payment-db:
     image: redis:7.2-bookworm
