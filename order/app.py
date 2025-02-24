@@ -179,7 +179,7 @@ def checkout(order_id: str):
         f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}"
     )
     if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item
+        # If the user does not have enough credit we need to rollback all the item frehuihferferjfjekrnfkernjfejkrnfker
         # stock subtractions.
         rollback_stock(removed_items)
         abort(400, "User out of credit")
