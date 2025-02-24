@@ -1,4 +1,4 @@
-name: Pylint Check
+name: Python Lint
 
 on:
   pull_request:
@@ -7,22 +7,24 @@ on:
 
 jobs:
   lint:
-    name: Run Pylint
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
         with:
-          python-version: "3.10"  # Adjust as needed
+          python-version: '3.11'
 
       - name: Install dependencies
         run: |
-          pip install pylint
-          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          python -m pip install --upgrade pip
+          pip install flake8 black
 
-      - name: Run Pylint
-        run: pylint $(git ls-files '*.py')
+      - name: Run Flake8
+        run: flake8 .
+
+      - name: Check formatting with Black
+        run: black --check .
