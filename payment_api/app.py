@@ -11,7 +11,7 @@ from flask import Flask, jsonify, abort, Response
 DB_ERROR_STR = "DB error"
 
 
-app = Flask("payment-service")
+app = Flask("payment-api")
 
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],

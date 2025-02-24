@@ -21,9 +21,6 @@ def close_db_connection():
     db.close()
 
 
-# insert RabbitMQ consumer
-
-
 atexit.register(close_db_connection)
 
 
@@ -82,7 +79,6 @@ def add_credit(user_id: str, amount: int):
 
 
 def remove_credit(user_id: str, amount: int):
-    app.logger.debug(f"Removing {amount} credit from user: {user_id}")
     user_entry: UserValue = get_user_from_db(user_id)
     # update credit, serialize and update database
     user_entry.credit -= int(amount)

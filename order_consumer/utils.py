@@ -1,23 +1,17 @@
-import logging
 import os
 import atexit
 import random
 import uuid
-from collections import defaultdict
 
 import redis
-import requests
 
 from msgspec import msgpack, Struct
-from flask import Flask, jsonify, abort, Response
-
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
 GATEWAY_URL = os.environ["GATEWAY_URL"]
 
-app = Flask("order-service")
 
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
