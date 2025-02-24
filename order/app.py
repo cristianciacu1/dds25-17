@@ -145,7 +145,8 @@ def add_item(order_id: str, item_id: str, quantity: int):
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(
-        f"Item: {item_id} added to: {order_id} price updated to: {order_entry.total_cost}",
+        f"Item: {item_id} added to: {order_id} "
+        f"price updated to: {order_entry.total_cost}",
         status=200,
     )
 
@@ -163,8 +164,8 @@ def checkout(order_id: str):
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
-    # The removed items will contain the items that we already have successfully subtracted stock from
-    # for rollback purposes.
+    # The removed items will contain the items that we already have successfully
+    # subtracted stock from for rollback purposes.
     removed_items: list[tuple[str, int]] = []
     for item_id, quantity in items_quantities.items():
         stock_reply = send_post_request(
@@ -179,7 +180,8 @@ def checkout(order_id: str):
         f"{GATEWAY_URL}/payment/pay/{order_entry.user_id}/{order_entry.total_cost}"
     )
     if user_reply.status_code != 200:
-        # If the user does not have enough credit we need to rollback all the item stock subtractions
+        # If the user does not have enough credit we need to rollback all the item
+        # stock subtractions.
         rollback_stock(removed_items)
         abort(400, "User out of credit")
     order_entry.paid = True
