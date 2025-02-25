@@ -4,6 +4,7 @@ import atexit
 import uuid
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+import pika
 
 
 DB_ERROR_STR = "DB error"
@@ -14,31 +15,57 @@ class StockValue(Struct):
     stock: int
     price: int
 
+class RabbitMQClient:
+    def __init__(self):
+        self.connection = pika.BlockingConnection(
+            pika.URLParameters(os.environ["RABBITMQ_URL"])
+        )
+        self.channel = self.connection.channel()
 
-def get_item_from_db(item_id: str) -> StockValue | None:
-    # get serialized data
-    try:
-        entry: bytes = db.get(item_id)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
-    if entry is None:
-        # if item does not exist in the database; abort
-        abort(400, f"Item: {item_id} not found!")
-    return entry
+        result = self.channel.queue_declare(queue='', exclusive=True)
+        self.callback_queue = result.method.queue
 
+        self.channel.basic_consume(
+            queue=self.callback_queue,
+            on_message_callback=self.on_response,
+            auto_ack=True)
+        
+        self.response = None
+        self.corr_id = None
+
+    def on_response(self, ch, method, properties, body):
+        """Handle response messages."""
+        if self.corr_id == properties.correlation_id:
+            self.response = msgpack.decode(body)
+
+    def call(self, queue_name, request_body):
+        """Send a message to the specified queue and wait for a response."""
+        self.corr_id = str(uuid.uuid4())  # Generate unique ID
+        self.response = None  # Initialize storage for response
+
+        self.channel.basic_publish(
+            exchange="",
+            routing_key=queue_name,
+            properties=pika.BasicProperties(
+                reply_to=self.callback_queue,  # Use specific reply queue
+                correlation_id=self.corr_id,
+            ),
+            body=msgpack.encode(request_body),
+        )
+
+        # Wait for response
+        while self.response is None:
+            self.connection.process_data_events()
+
+        return self.response  # Return the response
+
+
+rabbitMQ_client = RabbitMQClient()
 
 @app.post("/item/create/<price>")
 def create_item(price: int):
-    key = str(uuid.uuid4())
-    app.logger.debug(f"Item: {key} created")
-    value = msgpack.encode(StockValue(stock=0, price=int(price)))
-    try:
-        db.set(key, value)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return jsonify({"item_id": key})
+    response = rabbitMQ_client.call("stock_queue", {"function": "create_item", "price": price})
+    return response
 
 
 @app.post("/batch_init/<n>/<starting_stock>/<item_price>")
@@ -50,44 +77,26 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
         f"{i}": msgpack.encode(StockValue(stock=starting_stock, price=item_price))
         for i in range(n)
     }
-    try:
-        db.mset(kv_pairs)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return jsonify({"msg": "Batch init for stock successful"})
+    response = rabbitMQ_client.call("stock_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs})
+    return response
 
 
 @app.get("/find/<item_id>")
 def find_item(item_id: str):
-    item_entry: StockValue = get_item_from_db(item_id)
-    return jsonify({"stock": item_entry.stock, "price": item_entry.price})
+    response = rabbitMQ_client.call("stock_queue", {"function": "find_item", "item_id": item_id})
+    return response["entry"]
 
 
 @app.post("/add/<item_id>/<amount>")
 def add_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
-    item_entry.stock += int(amount)
-    try:
-        db.set(item_id, msgpack.encode(item_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    response = rabbitMQ_client.call("stock_queue", {"function": "add_stock", "item_id": item_id, "amount": amount})
+    return response
 
 
 @app.post("/subtract/<item_id>/<amount>")
 def remove_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
-    # update stock, serialize and update database
-    item_entry.stock -= int(amount)
-    app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
-    if item_entry.stock < 0:
-        abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
-    try:
-        db.set(item_id, msgpack.encode(item_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    response = rabbitMQ_client.call("stock_queue", {"function": "remove_stock", "item_id": item_id, "amount": amount})
+    return response
 
 
 if __name__ == "__main__":

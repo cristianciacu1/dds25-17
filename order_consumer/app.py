@@ -47,13 +47,47 @@ class OrderConsumer:
     def callback(self, ch, method, properties, body):
         """Processes request and sends response back."""
         msg = msgpack.decode(body)
+        try:
+            if msg["function"] == "create_order":
+                user_id = msg["user_id"]
+                key = create_order_db(user_id)
+                self.publish_reply(properties, {"order_id": key})
+            elif msg["function"] == "batch_init_users":
+                kv_pairs = msg["kv_pairs"]
+                batch_init_users_db(kv_pairs)
+                self.publish_reply(properties, {"msg": "Batch init for orders successful"})
+            elif msg["function"] == "find_order":
+                order_id = msg["order_id"]
+                entry = find_order_db(order_id)
+                response = {
+                        "order_id": order_id,
+                        "paid": entry.paid,
+                        "items": entry.items,
+                        "user_id": entry.user_id,
+                        "total_cost": entry.total_cost
+                    }
+                self.publish_reply(properties, response)
+            elif msg["function"] == "add_item":
+                order_entry = msg["order_entry"]
+                order_id = msg["order_id"]
+                add_item_db(order_id, order_entry)
+                self.publish_reply(properties, {"order_id": order_id})
+            elif msg["function"] == "checkout":
+                order_entry = msg["order_entry"]
+                order_id = msg["order_id"]
+                checkout_db(order_id, order_entry)
+                self.publish_reply(properties, {"msg": "Checkout successful"})
+        except Exception as e:
+            self.publish_reply(properties, {"status": 400, "msg": "Database error"})
+        ch.basic_ack(delivery_tag=method.delivery_tag)
 
-        if msg["function"] == "create_order":
-            key = create_order_db(msg["user_id"])
-            self.publish_reply(properties, {"status": 200, "order_id": key})
+
+
 
     def start(self):
+        self.__init__()
         """Starts consuming messages from RabbitMQ."""
+        self.channel.basic_qos(prefetch_count=1)
         self.channel.basic_consume(
             queue="order_queue", on_message_callback=self.callback
         )
@@ -91,28 +125,7 @@ def create_order_db(user_id: str):
     return key
 
 
-def batch_init_users_db(n: int, n_items: int, n_users: int, item_price: int):
-
-    n = int(n)
-    n_items = int(n_items)
-    n_users = int(n_users)
-    item_price = int(item_price)
-
-    def generate_entry() -> OrderValue:
-        user_id = random.randint(0, n_users - 1)
-        item1_id = random.randint(0, n_items - 1)
-        item2_id = random.randint(0, n_items - 1)
-        value = OrderValue(
-            paid=False,
-            items=[(f"{item1_id}", 1), (f"{item2_id}", 1)],
-            user_id=f"{user_id}",
-            total_cost=2 * item_price,
-        )
-        return value
-
-    kv_pairs: dict[str, bytes] = {
-        f"{i}": msgpack.encode(generate_entry()) for i in range(n)
-    }
+def batch_init_users_db(kv_pairs: dict[str, bytes]):
     try:
         db.mset(kv_pairs)
     except redis.exceptions.RedisError:
@@ -139,4 +152,5 @@ def checkout_db(order_id: str, order_entry: OrderValue):
 
 if __name__ == "__main__":
     consumer = OrderConsumer()
-    consumer.start()
+    while True:
+        consumer.start()

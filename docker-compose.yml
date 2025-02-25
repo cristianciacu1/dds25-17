@@ -39,6 +39,9 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      order-consumer:
+        condition: service_started
+
   
   order-consumer:
     build: ./order_consumer
@@ -67,6 +70,8 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      stock-consumer:
+        condition: service_started
   
   stock-consumer:
     build: ./stock_consumer
@@ -95,6 +100,8 @@ services:
     depends_on:
       rabbitmq:
         condition: service_healthy
+      payment-consumer:
+        condition: service_started
   
   payment-consumer:
     build: ./payment_consumer
