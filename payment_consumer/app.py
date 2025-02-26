@@ -1,4 +1,3 @@
-import logging
 import os
 import atexit
 import uuid
@@ -44,32 +43,47 @@ class PaymentConsumer:
         """Processes request and sends response back."""
         msg = msgpack.decode(body)
         try:
-            if msg["function"] == "create_user":
-                key = create_user_db()
-                self.publish_reply(properties, {"user_id": key})
-            elif msg["function"] == "batch_init_users":
-                kv_pairs = msg["kv_pairs"]
-                batch_init_users_db(kv_pairs)
-                self.publish_reply(properties, {"msg": "Batch init for users successful"})
-            elif msg["function"] == "find_user":
-                user_id = msg["user_id"]
-                user_entry = find_user_db(user_id)
-                response = {
-                    "user_id": user_id, 
-                    "credit": user_entry.credit
-                }
-                self.publish_reply(properties, response)
-            elif msg["function"] == "add_credit":
-                user_id = msg["user_id"]
-                amount = msg["amount"]
-                user_entry = add_credit_db(user_id, amount)
-                self.publish_reply(properties, f"User: {user_id} credit updated to: {user_entry.credit}")
-            elif msg["function"] == "remove_credit":
-                user_id = msg["user_id"]
-                amount = msg["amount"]
-                user_entry = remove_credit_db(user_id, amount)
-                self.publish_reply(properties, {"status": 200, "msg": f"User: {user_id} credit updated to: {user_entry.credit}"})
-        except Exception as e:
+            match msg["function"]:
+                case "create_user":
+                    key = create_user_db()
+                    self.publish_reply(properties, {"user_id": key})
+                case "batch_init_users":
+                    kv_pairs = msg["kv_pairs"]
+                    batch_init_users_db(kv_pairs)
+                    self.publish_reply(
+                        properties, {"msg": "Batch init for users successful"}
+                    )
+                case "find_user":
+                    user_id = msg["user_id"]
+                    user_entry = find_user_db(user_id)
+                    response = {"user_id": user_id, "credit": user_entry.credit}
+                    self.publish_reply(properties, response)
+                case "add_credit":
+                    user_id = msg["user_id"]
+                    amount = msg["amount"]
+                    user_entry = add_credit_db(user_id, amount)
+                    self.publish_reply(
+                        properties,
+                        "User: {} credit updated to: {}".format(
+                            user_id, user_entry.credit
+                        ),
+                    )
+                case "remove_credit":
+                    user_id = msg["user_id"]
+                    amount = msg["amount"]
+                    user_entry = remove_credit_db(user_id, amount)
+                    self.publish_reply(
+                        properties,
+                        {
+                            "status": 200,
+                            "msg": (
+                                "User: {} credit updated to: {}".format(
+                                    user_id, user_entry.credit
+                                )
+                            ),
+                        },
+                    )
+        except Exception:
             self.publish_reply(properties, {"status": 400, "msg": "Database error"})
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -148,7 +162,8 @@ def remove_credit_db(user_id: str, amount: int):
     except redis.exceptions.RedisError:
         raise Exception
     return user_entry
-    
+
+
 if __name__ == "__main__":
     consumer = PaymentConsumer()
     while True:

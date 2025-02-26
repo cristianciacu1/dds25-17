@@ -1,12 +1,12 @@
 import logging
 import os
-import atexit
 import uuid
 from msgspec import msgpack, Struct
-from flask import Flask, jsonify, abort, Response
+from flask import Flask
 import pika
 
 app = Flask("payment-api")
+
 
 class RabbitMQClient:
     def __init__(self):
@@ -15,14 +15,15 @@ class RabbitMQClient:
         )
         self.channel = self.connection.channel()
 
-        result = self.channel.queue_declare(queue='', exclusive=True)
+        result = self.channel.queue_declare(queue="", exclusive=True)
         self.callback_queue = result.method.queue
 
         self.channel.basic_consume(
             queue=self.callback_queue,
             on_message_callback=self.on_response,
-            auto_ack=True)
-        
+            auto_ack=True,
+        )
+
         self.response = None
         self.corr_id = None
 
@@ -52,7 +53,9 @@ class RabbitMQClient:
 
         return self.response  # Return the response
 
+
 rabbitMQ_client = RabbitMQClient()
+
 
 class UserValue(Struct):
     credit: int
@@ -71,27 +74,38 @@ def batch_init_users(n: int, starting_money: int):
     kv_pairs: dict[str, bytes] = {
         f"{i}": msgpack.encode(UserValue(credit=starting_money)) for i in range(n)
     }
-    response = rabbitMQ_client.call("payment_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs})
+    response = rabbitMQ_client.call(
+        "payment_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs}
+    )
     return response
 
 
 @app.get("/find_user/<user_id>")
 def find_user(user_id: str):
-    response = rabbitMQ_client.call("payment_queue", {"function": "find_user", "user_id": user_id})
+    response = rabbitMQ_client.call(
+        "payment_queue", {"function": "find_user", "user_id": user_id}
+    )
     return response
 
 
 @app.post("/add_funds/<user_id>/<amount>")
 def add_credit(user_id: str, amount: int):
-    response = rabbitMQ_client.call("payment_queue", {"function": "add_credit", "user_id": user_id, "amount": amount})
+    response = rabbitMQ_client.call(
+        "payment_queue",
+        {"function": "add_credit", "user_id": user_id, "amount": amount},
+    )
     return response
 
 
 @app.post("/pay/<user_id>/<amount>")
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-    response = rabbitMQ_client.call("payment_queue", {"function": "remove_credit", "user_id": user_id, "amount": amount})
+    response = rabbitMQ_client.call(
+        "payment_queue",
+        {"function": "remove_credit", "user_id": user_id, "amount": amount},
+    )
     return response
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)

@@ -1,9 +1,8 @@
 import logging
 import os
-import atexit
 import uuid
 from msgspec import msgpack, Struct
-from flask import Flask, jsonify, abort, Response
+from flask import Flask
 import pika
 
 
@@ -11,9 +10,11 @@ DB_ERROR_STR = "DB error"
 
 app = Flask("stock-api")
 
+
 class StockValue(Struct):
     stock: int
     price: int
+
 
 class RabbitMQClient:
     def __init__(self):
@@ -22,14 +23,15 @@ class RabbitMQClient:
         )
         self.channel = self.connection.channel()
 
-        result = self.channel.queue_declare(queue='', exclusive=True)
+        result = self.channel.queue_declare(queue="", exclusive=True)
         self.callback_queue = result.method.queue
 
         self.channel.basic_consume(
             queue=self.callback_queue,
             on_message_callback=self.on_response,
-            auto_ack=True)
-        
+            auto_ack=True,
+        )
+
         self.response = None
         self.corr_id = None
 
@@ -62,9 +64,12 @@ class RabbitMQClient:
 
 rabbitMQ_client = RabbitMQClient()
 
+
 @app.post("/item/create/<price>")
 def create_item(price: int):
-    response = rabbitMQ_client.call("stock_queue", {"function": "create_item", "price": price})
+    response = rabbitMQ_client.call(
+        "stock_queue", {"function": "create_item", "price": price}
+    )
     return response
 
 
@@ -77,25 +82,34 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
         f"{i}": msgpack.encode(StockValue(stock=starting_stock, price=item_price))
         for i in range(n)
     }
-    response = rabbitMQ_client.call("stock_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs})
+    response = rabbitMQ_client.call(
+        "stock_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs}
+    )
     return response
 
 
 @app.get("/find/<item_id>")
 def find_item(item_id: str):
-    response = rabbitMQ_client.call("stock_queue", {"function": "find_item", "item_id": item_id})
+    response = rabbitMQ_client.call(
+        "stock_queue", {"function": "find_item", "item_id": item_id}
+    )
     return response["entry"]
 
 
 @app.post("/add/<item_id>/<amount>")
 def add_stock(item_id: str, amount: int):
-    response = rabbitMQ_client.call("stock_queue", {"function": "add_stock", "item_id": item_id, "amount": amount})
+    response = rabbitMQ_client.call(
+        "stock_queue", {"function": "add_stock", "item_id": item_id, "amount": amount}
+    )
     return response
 
 
 @app.post("/subtract/<item_id>/<amount>")
 def remove_stock(item_id: str, amount: int):
-    response = rabbitMQ_client.call("stock_queue", {"function": "remove_stock", "item_id": item_id, "amount": amount})
+    response = rabbitMQ_client.call(
+        "stock_queue",
+        {"function": "remove_stock", "item_id": item_id, "amount": amount},
+    )
     return response
 
 

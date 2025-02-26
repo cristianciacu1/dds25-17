@@ -4,10 +4,11 @@ import os
 import random
 import uuid
 from msgspec import msgpack, Struct
-from flask import Flask, abort, Response
+from flask import Flask, abort
 import pika
 
 app = Flask("order-api")
+
 
 class RabbitMQClient:
     def __init__(self):
@@ -16,14 +17,15 @@ class RabbitMQClient:
         )
         self.channel = self.connection.channel()
 
-        result = self.channel.queue_declare(queue='', exclusive=True)
+        result = self.channel.queue_declare(queue="", exclusive=True)
         self.callback_queue = result.method.queue
 
         self.channel.basic_consume(
             queue=self.callback_queue,
             on_message_callback=self.on_response,
-            auto_ack=True)
-        
+            auto_ack=True,
+        )
+
         self.response = None
         self.corr_id = None
 
@@ -66,7 +68,9 @@ class OrderValue(Struct):
 
 @app.post("/create/<user_id>")
 def create_order(user_id: str):
-    response = rabbitMQ_client.call("order_queue", {"function": "create_order", "user_id": user_id})
+    response = rabbitMQ_client.call(
+        "order_queue", {"function": "create_order", "user_id": user_id}
+    )
     return response
 
 
@@ -93,42 +97,58 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
     kv_pairs: dict[str, bytes] = {
         f"{i}": msgpack.encode(generate_entry()) for i in range(n)
     }
-    response = rabbitMQ_client.call("order_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs})
+    response = rabbitMQ_client.call(
+        "order_queue", {"function": "batch_init_users", "kv_pairs": kv_pairs}
+    )
     return response
 
 
 @app.get("/find/<order_id>")
 def find_order(order_id: str):
-    response = rabbitMQ_client.call("order_queue", {"function": "find_order", "order_id": order_id})
+    response = rabbitMQ_client.call(
+        "order_queue", {"function": "find_order", "order_id": order_id}
+    )
     return response
 
 
 @app.post("/addItem/<order_id>/<item_id>/<quantity>")
 def add_item(order_id: str, item_id: str, quantity: int):
-    order_entry_response = rabbitMQ_client.call("order_queue", {"function": "find_order", "order_id": order_id})
+    order_entry_response = rabbitMQ_client.call(
+        "order_queue", {"function": "find_order", "order_id": order_id}
+    )
     order_entry = order_entry_response
 
-    item_reply_response = rabbitMQ_client.call("stock_queue", {"function": "find_item", "item_id": item_id})
+    item_reply_response = rabbitMQ_client.call(
+        "stock_queue", {"function": "find_item", "item_id": item_id}
+    )
     item_reply = item_reply_response["entry"]
     if item_reply_response["status"] != 200:
         abort(400, f"Item: {item_id} does not exist!")
-    
+
     order_entry["items"].append((item_id, int(quantity)))
     order_entry["total_cost"] += int(quantity) * item_reply["price"]
 
-    response = rabbitMQ_client.call("order_queue", {"function": "add_item", "order_entry": order_entry, "order_id": order_id})
+    response = rabbitMQ_client.call(
+        "order_queue",
+        {"function": "add_item", "order_entry": order_entry, "order_id": order_id},
+    )
     return response
 
 
 def rollback_stock(removed_items: list[tuple[str, int]]):
     for item_id, quantity in removed_items:
-        rabbitMQ_client.call("stock_queue", {"function": "add_stock", "item_id": item_id, "amount": quantity})
+        rabbitMQ_client.call(
+            "stock_queue",
+            {"function": "add_stock", "item_id": item_id, "amount": quantity},
+        )
 
 
 @app.post("/checkout/<order_id>")
 def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
-    order_entry_response = rabbitMQ_client.call("order_queue", {"function": "find_order", "order_id": order_id})
+    order_entry_response = rabbitMQ_client.call(
+        "order_queue", {"function": "find_order", "order_id": order_id}
+    )
     order_entry = order_entry_response
     # get the quantity per item
     items_quantities: dict[str, int] = defaultdict(int)
@@ -138,13 +158,23 @@ def checkout(order_id: str):
     # subtracted stock from for rollback purposes.
     removed_items: list[tuple[str, int]] = []
     for item_id, quantity in items_quantities.items():
-        stock_subtract_response = rabbitMQ_client.call("stock_queue", {"function": "remove_stock", "item_id": item_id, "amount": quantity})
+        stock_subtract_response = rabbitMQ_client.call(
+            "stock_queue",
+            {"function": "remove_stock", "item_id": item_id, "amount": quantity},
+        )
         if stock_subtract_response["status"] != 200:
             # If one item does not have enough stock we need to rollback
             rollback_stock(removed_items)
             abort(400, f"Out of stock on item_id: {item_id}")
         removed_items.append((item_id, quantity))
-    user_pay_response = rabbitMQ_client.call("payment_queue", {"function": "remove_credit", "user_id": order_entry["user_id"], "amount": order_entry["total_cost"]})
+    user_pay_response = rabbitMQ_client.call(
+        "payment_queue",
+        {
+            "function": "remove_credit",
+            "user_id": order_entry["user_id"],
+            "amount": order_entry["total_cost"],
+        },
+    )
     if user_pay_response["status"] != 200:
         # If the user does not have enough credit we need to rollback all the item
         # stock subtractions.
@@ -152,7 +182,10 @@ def checkout(order_id: str):
         abort(400, "User out of credit")
     order_entry["paid"] = True
 
-    response = rabbitMQ_client.call("order_queue", {"function": "checkout", "order_entry": order_entry, "order_id": order_id})
+    response = rabbitMQ_client.call(
+        "order_queue",
+        {"function": "checkout", "order_entry": order_entry, "order_id": order_id},
+    )
     return response
 
 

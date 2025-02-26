@@ -1,4 +1,3 @@
-import logging
 import os
 import atexit
 import uuid
@@ -29,6 +28,7 @@ class StockValue(Struct):
     stock: int
     price: int
 
+
 class StockConsumer:
     def __init__(self):
         # Establish connection to RabbitMQ
@@ -44,33 +44,48 @@ class StockConsumer:
         """Processes request and sends response back."""
         msg = msgpack.decode(body)
         try:
-            if msg["function"] == "create_item":
-                price = msg["price"]
-                key = create_item_db(price)
-                self.publish_reply(properties, {"item_id": key})
-            elif msg["function"] == "batch_init_users":
-                kv_pairs = msg["kv_pairs"]
-                batch_init_users_db(kv_pairs)
-                self.publish_reply(properties, {"msg": "Batch init for stock successful"})
-            elif msg["function"] == "find_item":
-                item_id = msg["item_id"]
-                item_entry = find_item_db(item_id)
-                response = {
-                    "stock": item_entry.stock, 
-                    "price": item_entry.price
-                }
-                self.publish_reply(properties, {"status": 200, "entry": response})
-            elif msg["function"] == "add_stock":
-                item_id = msg["item_id"]
-                amount = msg["amount"]
-                item_entry = add_stock_db(item_id, amount)
-                self.publish_reply(properties, f"Item: {item_id} stock updated to: {item_entry.stock}")
-            elif msg["function"] == "remove_stock":
-                item_id = msg["item_id"]
-                amount = msg["amount"]
-                item_entry = remove_stock_db(item_id, amount)
-                self.publish_reply(properties, {"status": 200, "msg": f"Item: {item_id} stock updated to: {item_entry.stock}"})
-        except Exception as e:
+            match msg["function"]:
+                case "create_item":
+                    price = msg["price"]
+                    key = create_item_db(price)
+                    self.publish_reply(properties, {"item_id": key})
+                case "batch_init_users":
+                    kv_pairs = msg["kv_pairs"]
+                    batch_init_users_db(kv_pairs)
+                    self.publish_reply(
+                        properties, {"msg": "Batch init for stock successful"}
+                    )
+                case "find_item":
+                    item_id = msg["item_id"]
+                    item_entry = find_item_db(item_id)
+                    response = {"stock": item_entry.stock, "price": item_entry.price}
+                    self.publish_reply(properties, {"status": 200, "entry": response})
+                case "add_stock":
+                    item_id = msg["item_id"]
+                    amount = msg["amount"]
+                    item_entry = add_stock_db(item_id, amount)
+                    self.publish_reply(
+                        properties,
+                        "Item: {} stock updated to: {}".format(
+                            item_id, item_entry.stock
+                        ),
+                    )
+                case "remove_stock":
+                    item_id = msg["item_id"]
+                    amount = msg["amount"]
+                    item_entry = remove_stock_db(item_id, amount)
+                    self.publish_reply(
+                        properties,
+                        {
+                            "status": 200,
+                            "msg": (
+                                "Item: {} stock updated to: {}".format(
+                                    item_id, item_entry.stock
+                                )
+                            ),
+                        },
+                    )
+        except Exception:
             self.publish_reply(properties, {"status": 400, "msg": "Database error"})
         ch.basic_ack(delivery_tag=method.delivery_tag)
 
@@ -90,6 +105,7 @@ class StockConsumer:
             properties=pika.BasicProperties(correlation_id=properties.correlation_id),
             body=msgpack.encode(response),
         )
+
 
 def get_item_from_db(item_id: str) -> StockValue | None:
     # get serialized data
@@ -124,7 +140,7 @@ def batch_init_users_db(kv_pairs: dict[str, bytes]):
 
 def find_item_db(item_id: str):
     return get_item_from_db(item_id)
-    
+
 
 def add_stock_db(item_id: str, amount: int):
     item_entry: StockValue = get_item_from_db(item_id)
@@ -136,17 +152,19 @@ def add_stock_db(item_id: str, amount: int):
         raise Exception
     return item_entry
 
+
 def remove_stock_db(item_id: str, amount: int):
     item_entry: StockValue = get_item_from_db(item_id)
     # update stock, serialize and update database
     item_entry.stock -= int(amount)
     if item_entry.stock < 0:
-       raise Exception
+        raise Exception
     try:
         db.set(item_id, msgpack.encode(item_entry))
     except redis.exceptions.RedisError:
         raise Exception
     return item_entry
+
 
 if __name__ == "__main__":
     consumer = StockConsumer()

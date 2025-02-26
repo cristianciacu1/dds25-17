@@ -1,9 +1,6 @@
-import logging
 import os
 import atexit
-import random
 import uuid
-from collections import defaultdict
 import redis
 import pika
 from msgspec import msgpack, Struct
@@ -48,41 +45,41 @@ class OrderConsumer:
         """Processes request and sends response back."""
         msg = msgpack.decode(body)
         try:
-            if msg["function"] == "create_order":
-                user_id = msg["user_id"]
-                key = create_order_db(user_id)
-                self.publish_reply(properties, {"order_id": key})
-            elif msg["function"] == "batch_init_users":
-                kv_pairs = msg["kv_pairs"]
-                batch_init_users_db(kv_pairs)
-                self.publish_reply(properties, {"msg": "Batch init for orders successful"})
-            elif msg["function"] == "find_order":
-                order_id = msg["order_id"]
-                entry = find_order_db(order_id)
-                response = {
+            match msg["function"]:
+                case "create_order":
+                    user_id = msg["user_id"]
+                    key = create_order_db(user_id)
+                    self.publish_reply(properties, {"order_id": key})
+                case "batch_init_users":
+                    kv_pairs = msg["kv_pairs"]
+                    batch_init_users_db(kv_pairs)
+                    self.publish_reply(
+                        properties, {"msg": "Batch init for orders successful"}
+                    )
+                case "find_order":
+                    order_id = msg["order_id"]
+                    entry = find_order_db(order_id)
+                    response = {
                         "order_id": order_id,
                         "paid": entry.paid,
                         "items": entry.items,
                         "user_id": entry.user_id,
-                        "total_cost": entry.total_cost
+                        "total_cost": entry.total_cost,
                     }
-                self.publish_reply(properties, response)
-            elif msg["function"] == "add_item":
-                order_entry = msg["order_entry"]
-                order_id = msg["order_id"]
-                add_item_db(order_id, order_entry)
-                self.publish_reply(properties, {"order_id": order_id})
-            elif msg["function"] == "checkout":
-                order_entry = msg["order_entry"]
-                order_id = msg["order_id"]
-                checkout_db(order_id, order_entry)
-                self.publish_reply(properties, {"msg": "Checkout successful"})
-        except Exception as e:
+                    self.publish_reply(properties, response)
+                case "add_item":
+                    order_entry = msg["order_entry"]
+                    order_id = msg["order_id"]
+                    add_item_db(order_id, order_entry)
+                    self.publish_reply(properties, {"order_id": order_id})
+                case "checkout":
+                    order_entry = msg["order_entry"]
+                    order_id = msg["order_id"]
+                    checkout_db(order_id, order_entry)
+                    self.publish_reply(properties, {"msg": "Checkout successful"})
+        except Exception:
             self.publish_reply(properties, {"status": 400, "msg": "Database error"})
         ch.basic_ack(delivery_tag=method.delivery_tag)
-
-
-
 
     def start(self):
         self.__init__()
