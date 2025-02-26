@@ -1,5 +1,19 @@
 version: "3"
 services:
+  rabbitmq:
+    image: rabbitmq:3-management
+    ports:
+      - '5672:5672'
+      - '15672:15672'
+    environment:
+      AMQP_URL: 'amqp://rabbitmq?connection_attempts=5&retry_delay=5'
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics check_port_connectivity
+      interval: 2s
+      timeout: 2s
+      retries: 30
 
   gateway:
     image: nginx:1.25-bookworm
@@ -21,7 +35,10 @@ services:
     env_file:
       - env/order_redis.env
     depends_on:
-      - order-db
+      order-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   order-db:
     image: redis:7.2-bookworm
@@ -33,8 +50,14 @@ services:
     command: gunicorn -b 0.0.0.0:5000 -w 2 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
+    deploy:
+      mode: replicated
+      replicas: 3
     depends_on:
-      - stock-db
+      stock-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   stock-db:
     image: redis:7.2-bookworm
@@ -47,7 +70,10 @@ services:
     env_file:
       - env/payment_redis.env
     depends_on:
-      - payment-db
+      payment-db:
+        condition: service_started
+      rabbitmq:
+        condition: service_healthy
 
   payment-db:
     image: redis:7.2-bookworm

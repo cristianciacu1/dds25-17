@@ -3,8 +3,11 @@ import os
 import atexit
 import random
 import uuid
+import threading
 from collections import defaultdict
 
+import json
+import pika
 import redis
 import requests
 
@@ -16,6 +19,10 @@ DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
 GATEWAY_URL = os.environ["GATEWAY_URL"]
+STOCK_SERVICE_REQUESTS_QUEUE = "stock_service"
+PAYMENT_SERVICE_REQUESTS_QUEUE = "payment_service"
+ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = "order_checkout_saga_replies"
+RABBITMQ_HOST = "amqp://guest:guest@rabbitmq:5672/%2F?heartbeat=1800"
 
 app = Flask("order-service")
 
@@ -156,8 +163,8 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
 
-@app.post("/checkout/<order_id>")
-def checkout(order_id: str):
+@app.post("/synccheckout/<order_id>")
+def syncCheckout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
     order_entry: OrderValue = get_order_from_db(order_id)
     # get the quantity per item
@@ -191,6 +198,80 @@ def checkout(order_id: str):
         return abort(400, DB_ERROR_STR)
     app.logger.debug("Checkout successful")
     return Response("Checkout successful", status=200)
+
+
+@app.post("/checkout/<order_id>")
+async def checkout(order_id: str):
+    app.logger.debug(f"Checking out {order_id}.")
+    order_entry: OrderValue = get_order_from_db(order_id)
+    # get the quantity per item.
+    items_quantities: dict[str, int] = defaultdict(int)
+    for item_id, quantity in order_entry.items:
+        items_quantities[item_id] += quantity
+
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+
+    # Publish subtract stock event to the Stock Service Queue.
+    channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
+    channel.basic_publish(
+        exchange="",
+        routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
+        body=json.dumps(items_quantities),
+    )
+    app.logger.info("Subtract stock action pushed to the Stock Service.")
+
+    # Publish charge user event to the Payment Service Queue.
+    channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
+    payment_service_message = {
+        "user_id": order_entry.user_id,
+        "total_cost": order_entry.total_cost,
+    }
+    channel.basic_publish(
+        exchange="",
+        routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
+        body=json.dumps(payment_service_message),
+    )
+    app.logger.info("Charge user action pushed to the Payment Service.")
+
+    connection.close()
+    return Response(
+        f"The process of checking out order {order_id} has started. "
+        + "Please check later the status of your order.",
+        status=200,
+    )
+
+
+def process_received_message(ch, method, properties, body):
+    """Callback function to process messages from RabbitMQ queue."""
+    # TODO: Implement saga.
+    pass
+
+
+def consume_order_checkout_saga_replies_queue():
+    """Continuously listen for messages on the order events queue."""
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+
+    # Ensure the queue exists
+    channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
+
+    # Start consuming messages
+    channel.basic_consume(
+        queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+        on_message_callback=process_received_message,
+    )
+
+    app.logger.info("Started listening to order checkout saga replies...")
+    channel.start_consuming()
+
+
+# Start RabbitMQ Consumer in a separate thread.
+# Used for processing messages from checkout order saga replies.
+consumer_thread = threading.Thread(
+    target=consume_order_checkout_saga_replies_queue, daemon=True
+)
+consumer_thread.start()
 
 
 if __name__ == "__main__":
