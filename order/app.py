@@ -22,9 +22,12 @@ GATEWAY_URL = os.environ["GATEWAY_URL"]
 STOCK_SERVICE_REQUESTS_QUEUE = "stock_service"
 PAYMENT_SERVICE_REQUESTS_QUEUE = "payment_service"
 ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = "order_checkout_saga_replies"
-RABBITMQ_HOST = "amqp://guest:guest@rabbitmq:5672/%2F?heartbeat=1800"
+RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("order-service")
+
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+channel = connection.channel()
 
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
@@ -210,9 +213,6 @@ async def checkout(order_id: str):
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
 
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
     # Publish subtract stock event to the Stock Service Queue.
     channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
     channel.basic_publish(
@@ -235,7 +235,6 @@ async def checkout(order_id: str):
     )
     app.logger.info("Charge user action pushed to the Payment Service.")
 
-    connection.close()
     return Response(
         f"The process of checking out order {order_id} has started. "
         + "Please check later the status of your order.",
