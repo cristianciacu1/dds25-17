@@ -140,6 +140,7 @@ def send_get_request(url: str):
 @app.post("/addItem/<order_id>/<item_id>/<quantity>")
 def add_item(order_id: str, item_id: str, quantity: int):
     order_entry: OrderValue = get_order_from_db(order_id)
+    # TODO: Maybe transform this HTTP request to a synchronous RPC call.
     item_reply = send_get_request(f"{GATEWAY_URL}/stock/find/{item_id}")
     if item_reply.status_code != 200:
         # Request failed because item does not exist
