@@ -51,9 +51,9 @@ atexit.register(close_db_connection)
 
 
 class OrderValue(Struct):
-    stock_status: Status
-    payment_status: Status
-    order_status: Status
+    stock_status: int
+    payment_status: int
+    order_status: int
     items: list[tuple[str, int]]
     user_id: str
     total_cost: int
@@ -178,6 +178,9 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 
 def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+    
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in items:
         items_quantities[item_id] -= quantity
@@ -198,6 +201,9 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
 
 
 def rollback_payment_async(order_id: str, order_entry: OrderValue):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+
     # Publish refund user event to the Payment Service Queue.
     channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
     payment_service_message = {
@@ -251,11 +257,15 @@ def syncCheckout(order_id: str):
 
 @app.post("/checkout/<order_id>")
 async def checkout(order_id: str):
-    app.logger.debug(f"Checking out {order_id}.")
+    app.logger.info(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
     order_entry.stock_status = Status.PENDING.value
     order_entry.order_status = Status.PENDING.value
     order_entry.payment_status = Status.PENDING.value
+    try:
+        db.set(order_id, msgpack.encode(order_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
     # get the quantity per item.
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
@@ -273,7 +283,6 @@ async def checkout(order_id: str):
         routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
         body=json.dumps(stock_service_message),
     )
-    app.logger.info("Subtract stock action pushed to the Stock Service.")
 
     # Publish charge user event to the Payment Service Queue.
     channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
@@ -287,7 +296,6 @@ async def checkout(order_id: str):
         routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
         body=json.dumps(payment_service_message),
     )
-    app.logger.info("Charge user action pushed to the Payment Service.")
 
     return Response(
         f"The process of checking out order {order_id} has started. "
@@ -301,28 +309,30 @@ def process_received_message(ch, method, properties, body):
     message = json.loads(body.decode())
     order_id = message["order_id"]
     order_entry: OrderValue = get_order_from_db(order_id)
-    app.logger.info(message["message"] + " " + str(message["status"]))
     match message["type"]:
         case "payment":
             if message["status"] == 200:
                 order_entry.payment_status = Status.ACCEPTED.value
                 if order_entry.stock_status == Status.ACCEPTED.value:
                     order_entry.order_status = Status.ACCEPTED.value
+                    app.logger.info(f"Order {order_id} was checked out successfully.")
                 elif order_entry.stock_status == Status.REJECTED.value:
                     rollback_payment_async(order_id, order_entry)
                     order_entry.order_status = Status.REJECTED.value
                     order_entry.payment_status = Status.REJECTED.value
+                    app.logger.info(f"Order {order_id} was rejected since payment was accepted but stock was not.")
             else: 
                 order_entry.payment_status = Status.REJECTED.value
                 if order_entry.stock_status == Status.ACCEPTED.value:
                     order_entry.order_status = Status.REJECTED.value
                     rollback_stock_async(order_id, order_entry.items)
                     order_entry.stock_status = Status.REJECTED.value
+                    app.logger.info(f"Order {order_id} was rejected since stock was accepted but payment was not.")
                 elif order_entry.stock_status == Status.REJECTED.value:
                     order_entry.order_status = Status.REJECTED.value
+                    app.logger.info(f"Order {order_id} was rejected since both payment and stock were rejected.")
             try:
                 db.set(order_id, msgpack.encode(order_entry))
-                app.logger.info(f"Order {order_id} was checked out successfully.")
             except redis.exceptions.RedisError:
                 return abort(400, DB_ERROR_STR)
             return
@@ -331,21 +341,24 @@ def process_received_message(ch, method, properties, body):
                 order_entry.stock_status = Status.ACCEPTED.value
                 if order_entry.payment_status == Status.ACCEPTED.value:
                     order_entry.order_status = Status.ACCEPTED.value
+                    app.logger.info(f"Order {order_id} was checked out successfully.")
                 elif order_entry.payment_status == Status.REJECTED.value:
                     rollback_stock_async(order_id, order_entry.items)
                     order_entry.order_status = Status.REJECTED.value
                     order_entry.stock_status = Status.REJECTED.value
+                    app.logger.info(f"Order {order_id} was rejected since stock was accepted but payment was not.")
             else: 
                 order_entry.stock_status = Status.REJECTED.value
                 if order_entry.payment_status == Status.ACCEPTED.value:
                     order_entry.order_status = Status.REJECTED.value
                     rollback_payment_async(order_id, order_entry)
                     order_entry.payment_status = Status.REJECTED.value
+                    app.logger.info(f"Order {order_id} was rejected since payment was accepted but stock was not.")
                 elif order_entry.payment_status == Status.REJECTED.value:
                     order_entry.order_status = Status.REJECTED.value
+                    app.logger.info(f"Order {order_id} was rejected since both payment and stock were rejected.")
             try:
                 db.set(order_id, msgpack.encode(order_entry))
-                app.logger.info(f"Order {order_id} was checked out successfully.")
             except redis.exceptions.RedisError:
                 return abort(400, DB_ERROR_STR)
             return

@@ -52,9 +52,6 @@ services:
     env_file:
       - env/stock_redis.env
       - env/api.env
-    deploy:
-      mode: replicated
-      replicas: 3
     depends_on:
       stock-db:
         condition: service_started
