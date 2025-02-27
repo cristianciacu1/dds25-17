@@ -13,9 +13,9 @@ from flask import Flask, jsonify, abort, Response
 
 
 DB_ERROR_STR = "DB error"
-STOCK_SERVICE_REQUESTS_QUEUE = "stock_service"
-ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = "order_checkout_saga_replies"
-RABBITMQ_HOST = "amqp://guest:guest@rabbitmq:5672/%2F?heartbeat=1800"
+STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
+ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = os.environ["ORDER_CHECKOUT_SAGA_REPLIES_QUEUE"]
+RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("stock-service")
 
