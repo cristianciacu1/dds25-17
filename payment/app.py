@@ -18,9 +18,6 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("payment-service")
 
-connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-channel = connection.channel()
-
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
     port=int(os.environ["REDIS_PORT"]),
@@ -117,6 +114,11 @@ def remove_credit(user_id: str, amount: int):
 
 
 def publish_message(message, status, order_id, user_id):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+
+    channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
+
     """Helper function to publish messages to RabbitMQ"""
     response = {
         "message": message.format(order_id=order_id, user_id=user_id),
@@ -131,12 +133,11 @@ def publish_message(message, status, order_id, user_id):
     )
     app.logger.info(response["message"])
 
+    connection.close()
+
 
 def process_message(ch, method, properties, body):
     """Callback function to process messages from RabbitMQ queue."""
-
-    channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
-
     # Expected message type: {'user_id': int, 'total_cost': int}.
     message = json.loads(body.decode())
     user_id = message["user_id"]
@@ -187,13 +188,16 @@ def process_message(ch, method, properties, body):
 
 def consume_stock_service_requests_queue():
     """Continuously listen for messages on the order events queue."""
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
 
     # Ensure the queue exists.
     channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
 
     # Start consuming messages.
     channel.basic_consume(
-        queue=PAYMENT_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message
+        queue=PAYMENT_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message,
+        auto_ack=True
     )
 
     app.logger.info("Started listening to payment service requests queue...")

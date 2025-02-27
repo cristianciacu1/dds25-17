@@ -20,9 +20,6 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("stock-service")
 
-connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-channel = connection.channel()
-
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
     port=int(os.environ["REDIS_PORT"]),
@@ -120,6 +117,9 @@ def remove_stock(item_id: str, amount: int):
 
 
 def rollback_stock(removed_items: list[tuple[str, int]]):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+
     """Utility function to rollback all transactions from `removed_items`."""
     for removed_item_id, removed_quantity in removed_items:
         # Possible optimization: keep the StockValue object in the
@@ -149,8 +149,15 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
             raise e
     app.logger.info("Stock rollback was successful.")
 
+    connection.close()
+
 
 def publish_message(message, status, order_id, item_id, e=None):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+
+    channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
+
     """Helper function to publish messages to RabbitMQ"""
     response = {
         "message": message.format(order_id=order_id, item_id=item_id,e=e),
@@ -164,6 +171,8 @@ def publish_message(message, status, order_id, item_id, e=None):
         body=json.dumps(response),
     )
     app.logger.info(response["message"])
+
+    connection.close()
 
 
 def process_message(ch, method, properties, body):
@@ -188,7 +197,6 @@ def process_message(ch, method, properties, body):
                 # If the rollback was successful, then publish event to the order
                 # checkout saga informing it that there was not enough stock for at
                 # least one item from the current order.
-                channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
                 publish_message("For item: '{item_id}', there was not enough stock.", 400, order_id, item_id)
                 return
             except redis.exceptions.RedisError:
@@ -214,6 +222,8 @@ def process_message(ch, method, properties, body):
 
 
 def consume_stock_service_requests_queue():
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
     """Continuously listen for messages on the order events queue."""
 
     # Ensure the queue exists.
@@ -221,7 +231,8 @@ def consume_stock_service_requests_queue():
 
     # Start consuming messages.
     channel.basic_consume(
-        queue=STOCK_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message
+        queue=STOCK_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message,
+        auto_ack=True
     )
 
     app.logger.info("Started listening to stock service requests queue...")

@@ -27,9 +27,6 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("order-service")
 
-connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-channel = connection.channel()
-
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
     port=int(os.environ["REDIS_PORT"]),
@@ -199,6 +196,8 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
     )
     app.logger.info("Rollback stock action pushed to the Stock Service.")
 
+    connection.close()
+
 
 def rollback_payment_async(order_id: str, order_entry: OrderValue):
     connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
@@ -217,6 +216,8 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
         body=json.dumps(payment_service_message),
     )
     app.logger.info("Refund user action pushed to the Payment Service.")
+
+    connection.close()
 
 @app.post("/synccheckout/<order_id>")
 def syncCheckout(order_id: str):
@@ -257,8 +258,16 @@ def syncCheckout(order_id: str):
 
 @app.post("/checkout/<order_id>")
 async def checkout(order_id: str):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
+    
     app.logger.info(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
+    if order_entry.order_status != Status.IDLE.value:
+        return Response(
+            f"The process of checking out order {order_id} has already started.",
+            status=200,
+        )
     order_entry.stock_status = Status.PENDING.value
     order_entry.order_status = Status.PENDING.value
     order_entry.payment_status = Status.PENDING.value
@@ -297,6 +306,7 @@ async def checkout(order_id: str):
         body=json.dumps(payment_service_message),
     )
 
+    connection.close()
     return Response(
         f"The process of checking out order {order_id} has started. "
         + "Please check later the status of your order.",
@@ -323,13 +333,13 @@ def process_received_message(ch, method, properties, body):
                     app.logger.info(f"Order {order_id} was rejected since payment was accepted but stock was not.")
             else: 
                 order_entry.payment_status = Status.REJECTED.value
-                if order_entry.stock_status == Status.ACCEPTED.value:
-                    order_entry.order_status = Status.REJECTED.value
+                order_entry.order_status = Status.REJECTED.value
+
+                if order_entry.stock_status == Status.ACCEPTED.value:    
                     rollback_stock_async(order_id, order_entry.items)
                     order_entry.stock_status = Status.REJECTED.value
                     app.logger.info(f"Order {order_id} was rejected since stock was accepted but payment was not.")
                 elif order_entry.stock_status == Status.REJECTED.value:
-                    order_entry.order_status = Status.REJECTED.value
                     app.logger.info(f"Order {order_id} was rejected since both payment and stock were rejected.")
             try:
                 db.set(order_id, msgpack.encode(order_entry))
@@ -349,13 +359,13 @@ def process_received_message(ch, method, properties, body):
                     app.logger.info(f"Order {order_id} was rejected since stock was accepted but payment was not.")
             else: 
                 order_entry.stock_status = Status.REJECTED.value
+                order_entry.order_status = Status.REJECTED.value
+
                 if order_entry.payment_status == Status.ACCEPTED.value:
-                    order_entry.order_status = Status.REJECTED.value
                     rollback_payment_async(order_id, order_entry)
                     order_entry.payment_status = Status.REJECTED.value
                     app.logger.info(f"Order {order_id} was rejected since payment was accepted but stock was not.")
                 elif order_entry.payment_status == Status.REJECTED.value:
-                    order_entry.order_status = Status.REJECTED.value
                     app.logger.info(f"Order {order_id} was rejected since both payment and stock were rejected.")
             try:
                 db.set(order_id, msgpack.encode(order_entry))
@@ -382,6 +392,7 @@ def consume_order_checkout_saga_replies_queue():
     channel.basic_consume(
         queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
         on_message_callback=process_received_message,
+        auto_ack=True
     )
 
     app.logger.info("Started listening to order checkout saga replies...")
