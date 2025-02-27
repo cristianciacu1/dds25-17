@@ -120,7 +120,9 @@ def publish_message(message, status, order_id, user_id):
     """Helper function to publish messages to RabbitMQ"""
     response = {
         "message": message.format(order_id=order_id, user_id=user_id),
+        "order_id": order_id,
         "status": status,
+        "type": "payment"
     }
     channel.basic_publish(
         exchange="",

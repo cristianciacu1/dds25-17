@@ -150,15 +150,33 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
     app.logger.info("Stock rollback was successful.")
 
 
+def publish_message(message, status, order_id, item_id, e=None):
+    """Helper function to publish messages to RabbitMQ"""
+    response = {
+        "message": message.format(order_id=order_id, item_id=item_id,e=e),
+        "order_id": order_id,
+        "status": status,
+        "type": "stock"
+    }
+    channel.basic_publish(
+        exchange="",
+        routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+        body=json.dumps(response),
+    )
+    app.logger.info(response["message"])
+
+
 def process_message(ch, method, properties, body):
     """Callback function to process messages from RabbitMQ queue."""
-    # Expected message type: {'item_id': id, 'quantity': n, ...}.
+    # Expected message type: {'order_id': int, {'item_id': id, 'quantity': n, ...}}.
     message = json.loads(body.decode())
+    order_id = message["order_id"]
+    items_quantities = message["items_quantities"]
 
     # The removed items will contain the items that we already have successfully
     # subtracted stock from for rollback purposes.
     removed_items: list[tuple[str, int]] = []
-    for item_id, quantity in message.items():
+    for item_id, quantity in items_quantities.items():
         item_entry: StockValue = get_item_from_db(item_id)
         # update stock, serialize and update database.
         item_entry.stock -= int(quantity)
@@ -171,19 +189,7 @@ def process_message(ch, method, properties, body):
                 # checkout saga informing it that there was not enough stock for at
                 # least one item from the current order.
                 channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
-                message = {
-                    "message": f"For item: '{item_id}', there was not enough stock.",
-                    "status": 400,
-                }
-                channel.basic_publish(
-                    exchange="",
-                    routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                    body=json.dumps(message),
-                )
-                app.logger.info(
-                    f"For item: '{item_id}', there was not enough stock. Thus, this "
-                    + "order was no longer processed."
-                )
+                publish_message("For item: '{item_id}', there was not enough stock.", 400, order_id, item_id)
                 return
             except redis.exceptions.RedisError:
                 # If the rollback was not successful, then return early.
@@ -198,34 +204,13 @@ def process_message(ch, method, properties, body):
         except redis.exceptions.RedisError as e:
             # In case there was a database failure, Publish FAIL message to the Order
             # Checkout saga replies queue.
-            message = {
-                "message": f"For item: '{item_id}', there was a database error when "
-                + f"trying to save the updated value.\n{e}",
-                "status": 400,
-            }
-            channel.basic_publish(
-                exchange="",
-                routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                body=json.dumps(message),
-            )
-            app.logger.warning(
-                f"For item: '{item_id}', there was a database error when trying to "
-                + f"save the updated value.\n{e}"
-            )
+            publish_message("For item: '{item_id}', there was a database error when "
+                + "trying to save the updated value.\n{e}", 400, order_id, item_id, e)
             return
 
     # In case there was enough stock for the entire order, then publish SUCCESS
     # message to the Order Checkout saga replies queue.
-    message = {
-        "message": "Stock was successfully updated based on the order.",
-        "status": 200,
-    }
-    channel.basic_publish(
-        exchange="",
-        routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-        body=json.dumps(message),
-    )
-    app.logger.info("Stock was successfully updated based on the order.")
+    publish_message("Stock was successfully updated based on the order.", 200, order_id, None)
 
 
 def consume_stock_service_requests_queue():

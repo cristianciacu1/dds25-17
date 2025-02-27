@@ -1,3 +1,4 @@
+from enum import Enum
 import logging
 import os
 import atexit
@@ -40,12 +41,19 @@ db: redis.Redis = redis.Redis(
 def close_db_connection():
     db.close()
 
+class Status(Enum):
+    IDLE = 0
+    PENDING = 1
+    ACCEPTED = 2
+    REJECTED = 3
 
 atexit.register(close_db_connection)
 
 
 class OrderValue(Struct):
-    paid: bool
+    stock_status: Status
+    payment_status: Status
+    order_status: Status
     items: list[tuple[str, int]]
     user_id: str
     total_cost: int
@@ -69,7 +77,7 @@ def get_order_from_db(order_id: str) -> OrderValue | None:
 def create_order(user_id: str):
     key = str(uuid.uuid4())
     value = msgpack.encode(
-        OrderValue(paid=False, items=[], user_id=user_id, total_cost=0)
+        OrderValue(stock_status = Status.IDLE.value, payment_status = Status.IDLE.value, order_status = Status.IDLE.value, items=[], user_id=user_id, total_cost=0)
     )
     try:
         db.set(key, value)
@@ -91,7 +99,7 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
         item1_id = random.randint(0, n_items - 1)
         item2_id = random.randint(0, n_items - 1)
         value = OrderValue(
-            paid=False,
+            stock_status = Status.IDLE.value, payment_status = Status.IDLE.value, order_status = Status.IDLE.value,
             items=[(f"{item1_id}", 1), (f"{item2_id}", 1)],
             user_id=f"{user_id}",
             total_cost=2 * item_price,
@@ -114,7 +122,9 @@ def find_order(order_id: str):
     return jsonify(
         {
             "order_id": order_id,
-            "paid": order_entry.paid,
+            "stock_status": Status(order_entry.stock_status),
+            "payment_status": Status(order_entry.payment_status),
+            "order_status": Status(order_entry.order_status),
             "items": order_entry.items,
             "user_id": order_entry.user_id,
             "total_cost": order_entry.total_cost,
@@ -167,6 +177,41 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
 
+def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
+    items_quantities: dict[str, int] = defaultdict(int)
+    for item_id, quantity in items:
+        items_quantities[item_id] -= quantity
+
+    stock_service_message = {
+        "items_quantities": items_quantities,
+        "order_id": order_id
+    }
+
+    # Publish subtract stock event to the Stock Service Queue.
+    channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
+    channel.basic_publish(
+        exchange="",
+        routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
+        body=json.dumps(stock_service_message),
+    )
+    app.logger.info("Rollback stock action pushed to the Stock Service.")
+
+
+def rollback_payment_async(order_id: str, order_entry: OrderValue):
+    # Publish refund user event to the Payment Service Queue.
+    channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
+    payment_service_message = {
+        "user_id": order_entry.user_id,
+        "total_cost": -order_entry.total_cost,
+        "order_id": order_id,
+    }
+    channel.basic_publish(
+        exchange="",
+        routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
+        body=json.dumps(payment_service_message),
+    )
+    app.logger.info("Refund user action pushed to the Payment Service.")
+
 @app.post("/synccheckout/<order_id>")
 def syncCheckout(order_id: str):
     app.logger.debug(f"Checking out {order_id}")
@@ -195,7 +240,7 @@ def syncCheckout(order_id: str):
         # stock subtractions.
         rollback_stock(removed_items)
         abort(400, "User out of credit")
-    order_entry.paid = True
+    order_entry.order_status = Status.ACCEPTED.value
     try:
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
@@ -208,17 +253,25 @@ def syncCheckout(order_id: str):
 async def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
+    order_entry.stock_status = Status.PENDING.value
+    order_entry.order_status = Status.PENDING.value
+    order_entry.payment_status = Status.PENDING.value
     # get the quantity per item.
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
+
+    stock_service_message = {
+        "items_quantities": items_quantities,
+        "order_id": order_id
+    }
 
     # Publish subtract stock event to the Stock Service Queue.
     channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
     channel.basic_publish(
         exchange="",
         routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
-        body=json.dumps(items_quantities),
+        body=json.dumps(stock_service_message),
     )
     app.logger.info("Subtract stock action pushed to the Stock Service.")
 
@@ -245,9 +298,60 @@ async def checkout(order_id: str):
 
 def process_received_message(ch, method, properties, body):
     """Callback function to process messages from RabbitMQ queue."""
-    # TODO: Implement saga.
     message = json.loads(body.decode())
+    order_id = message["order_id"]
+    order_entry: OrderValue = get_order_from_db(order_id)
     app.logger.info(message["message"] + " " + str(message["status"]))
+    match message["type"]:
+        case "payment":
+            if message["status"] == 200:
+                order_entry.payment_status = Status.ACCEPTED.value
+                if order_entry.stock_status == Status.ACCEPTED.value:
+                    order_entry.order_status = Status.ACCEPTED.value
+                elif order_entry.stock_status == Status.REJECTED.value:
+                    rollback_payment_async(order_id, order_entry)
+                    order_entry.order_status = Status.REJECTED.value
+                    order_entry.payment_status = Status.REJECTED.value
+            else: 
+                order_entry.payment_status = Status.REJECTED.value
+                if order_entry.stock_status == Status.ACCEPTED.value:
+                    order_entry.order_status = Status.REJECTED.value
+                    rollback_stock_async(order_id, order_entry.items)
+                    order_entry.stock_status = Status.REJECTED.value
+                elif order_entry.stock_status == Status.REJECTED.value:
+                    order_entry.order_status = Status.REJECTED.value
+            try:
+                db.set(order_id, msgpack.encode(order_entry))
+                app.logger.info(f"Order {order_id} was checked out successfully.")
+            except redis.exceptions.RedisError:
+                return abort(400, DB_ERROR_STR)
+            return
+        case "stock":
+            if message["status"] == 200:
+                order_entry.stock_status = Status.ACCEPTED.value
+                if order_entry.payment_status == Status.ACCEPTED.value:
+                    order_entry.order_status = Status.ACCEPTED.value
+                elif order_entry.payment_status == Status.REJECTED.value:
+                    rollback_stock_async(order_id, order_entry.items)
+                    order_entry.order_status = Status.REJECTED.value
+                    order_entry.stock_status = Status.REJECTED.value
+            else: 
+                order_entry.stock_status = Status.REJECTED.value
+                if order_entry.payment_status == Status.ACCEPTED.value:
+                    order_entry.order_status = Status.REJECTED.value
+                    rollback_payment_async(order_id, order_entry)
+                    order_entry.payment_status = Status.REJECTED.value
+                elif order_entry.payment_status == Status.REJECTED.value:
+                    order_entry.order_status = Status.REJECTED.value
+            try:
+                db.set(order_id, msgpack.encode(order_entry))
+                app.logger.info(f"Order {order_id} was checked out successfully.")
+            except redis.exceptions.RedisError:
+                return abort(400, DB_ERROR_STR)
+            return
+        case _ :
+            app.logger.info(f"Received unexpected message type: {message["type"]}.")
+            return
     return
 
 
