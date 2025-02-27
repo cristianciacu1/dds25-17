@@ -168,12 +168,13 @@ def process_message(ch, method, properties, body):
 
         # If successful, then publish SUCCESS event to the order checkout saga
         # replies queue.
-        publish_message(
-            f"For order {order_id}, the user {user_id} was charged successfully.",
-            200,
-            order_id,
-            user_id,
-        )
+        if not (message["type"]=="compensation"):
+            publish_message(
+                f"For order {order_id}, the user {user_id} was charged successfully.",
+                200,
+                order_id,
+                user_id,
+            )
     except redis.exceptions.RedisError:
         # If the change in user's funds could not be persisted, then publish FAIL
         # event to the order checkout saga.

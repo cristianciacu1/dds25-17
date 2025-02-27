@@ -84,7 +84,6 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
 
 @app.get("/find/<item_id>")
 def find_item(item_id: str):
-    app.logger.info(f"Item {item_id} is searched.")
     item_entry: StockValue = get_item_from_db(item_id)
     return jsonify({"stock": item_entry.stock, "price": item_entry.price})
 
@@ -218,7 +217,8 @@ def process_message(ch, method, properties, body):
 
     # In case there was enough stock for the entire order, then publish SUCCESS
     # message to the Order Checkout saga replies queue.
-    publish_message("Stock was successfully updated based on the order.", 200, order_id, None)
+    if not (message["type"]=="compensation"):
+        publish_message("Stock was successfully updated based on the order.", 200, order_id, None)
 
 
 def consume_stock_service_requests_queue():

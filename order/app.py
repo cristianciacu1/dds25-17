@@ -165,7 +165,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
     return Response(
         f"Item: {item_id} added to: {order_id} "
         f"price updated to: {order_entry.total_cost}",
-        status=200,
+        status=200
     )
 
 
@@ -184,7 +184,8 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
 
     stock_service_message = {
         "items_quantities": items_quantities,
-        "order_id": order_id
+        "order_id": order_id,
+        "type": "compensation"
     }
 
     # Publish subtract stock event to the Stock Service Queue.
@@ -209,6 +210,7 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
         "user_id": order_entry.user_id,
         "total_cost": -order_entry.total_cost,
         "order_id": order_id,
+        "type": "compensation"
     }
     channel.basic_publish(
         exchange="",
@@ -282,7 +284,8 @@ async def checkout(order_id: str):
 
     stock_service_message = {
         "items_quantities": items_quantities,
-        "order_id": order_id
+        "order_id": order_id,
+        "type": "action"
     }
 
     # Publish subtract stock event to the Stock Service Queue.
@@ -299,6 +302,7 @@ async def checkout(order_id: str):
         "user_id": order_entry.user_id,
         "total_cost": order_entry.total_cost,
         "order_id": order_id,
+        "type": "action"
     }
     channel.basic_publish(
         exchange="",
