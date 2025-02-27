@@ -166,8 +166,8 @@ def process_message(ch, method, properties, body):
         # Try to persist the change in user's funds.
         db.set(user_id, msgpack.encode(user_entry))
 
-        # If successful, then publish SUCCESS event to the order checkout saga
-        # replies queue.
+        # If successful and a saga action was performed then publish SUCCESS event to
+        # the order checkout saga replies queue.
         if not (message["type"]=="compensation"):
             publish_message(
                 f"For order {order_id}, the user {user_id} was charged successfully.",
@@ -175,6 +175,10 @@ def process_message(ch, method, properties, body):
                 order_id,
                 user_id,
             )
+        else:
+            # If a saga compensation action was performed, then just log the outcome.
+            app.logger.info(f"For order {order_id}, the user {user_id} was refunded "
+                            + "successfully.")
     except redis.exceptions.RedisError:
         # If the change in user's funds could not be persisted, then publish FAIL
         # event to the order checkout saga.

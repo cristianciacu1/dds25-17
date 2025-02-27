@@ -195,7 +195,7 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
         routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
         body=json.dumps(stock_service_message),
     )
-    app.logger.info("Rollback stock action pushed to the Stock Service.")
+    app.logger.info(f"For order {order_id}, rollback stock action pushed to the Stock Service.")
 
     connection.close()
 
@@ -217,7 +217,7 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
         routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
         body=json.dumps(payment_service_message),
     )
-    app.logger.info("Refund user action pushed to the Payment Service.")
+    app.logger.info(f"For order {order_id}, refund user action pushed to the Payment Service.")
 
     connection.close()
 

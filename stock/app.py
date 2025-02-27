@@ -115,7 +115,7 @@ def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
-def rollback_stock(removed_items: list[tuple[str, int]]):
+def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
     connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
     channel = connection.channel()
 
@@ -146,7 +146,7 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
                 + "when trying to rollback the updated value.\n{e}"
             )
             raise e
-    app.logger.info("Stock rollback was successful.")
+    app.logger.info(f"For order {order_id}, stock rollback was successful. Rolled back the stock for {len(removed_items)} items.")
 
     connection.close()
 
@@ -191,12 +191,12 @@ def process_message(ch, method, properties, body):
         if item_entry.stock < 0:
             try:
                 # Rollback the stock to the already processed items.
-                rollback_stock(removed_items)
+                rollback_stock(order_id, removed_items)
 
                 # If the rollback was successful, then publish event to the order
                 # checkout saga informing it that there was not enough stock for at
                 # least one item from the current order.
-                publish_message("For item: '{item_id}', there was not enough stock.", 400, order_id, item_id)
+                publish_message("For order {order_id}, there was not enough stock for item {item_id}.", 400, order_id, item_id)
                 return
             except redis.exceptions.RedisError:
                 # If the rollback was not successful, then return early.
@@ -211,14 +211,18 @@ def process_message(ch, method, properties, body):
         except redis.exceptions.RedisError as e:
             # In case there was a database failure, Publish FAIL message to the Order
             # Checkout saga replies queue.
-            publish_message("For item: '{item_id}', there was a database error when "
-                + "trying to save the updated value.\n{e}", 400, order_id, item_id, e)
+            publish_message("For order {order_id}, there was a database error when "
+                + "trying to save the updated value for item {item_id}.\n{e}", 400, order_id, item_id, e)
             return
 
     # In case there was enough stock for the entire order, then publish SUCCESS
     # message to the Order Checkout saga replies queue.
     if not (message["type"]=="compensation"):
-        publish_message("Stock was successfully updated based on the order.", 200, order_id, None)
+        publish_message("For order {order_id}, stock was successfully updated based on the order.", 200, order_id, None)
+    else:
+        # If a rollback was performed, then log the outcome.
+        app.logger.info(f"For order {order_id}, the stock was rolled back "
+                        + "successfully.")
 
 
 def consume_stock_service_requests_queue():
