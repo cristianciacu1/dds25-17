@@ -227,6 +227,7 @@ async def checkout(order_id: str):
     payment_service_message = {
         "user_id": order_entry.user_id,
         "total_cost": order_entry.total_cost,
+        "order_id": order_id,
     }
     channel.basic_publish(
         exchange="",
