@@ -10,6 +10,7 @@ import json
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+import redis.exceptions
 
 
 DB_ERROR_STR = "DB error"
@@ -118,6 +119,37 @@ def remove_stock(item_id: str, amount: int):
     return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
 
 
+def rollback_stock(removed_items: list[tuple[str, int]]):
+    """Utility function to rollback all transactions from `removed_items`."""
+    for removed_item_id, removed_quantity in removed_items:
+        # Possible optimization: keep the StockValue object in the
+        # `removed_items` list.
+        removed_item_entry: StockValue = get_item_from_db(removed_item_id)
+        removed_item_entry.stock += int(removed_quantity)
+        try:
+            db.set(removed_item_id, msgpack.encode(removed_item_entry))
+        except redis.exceptions.RedisError as e:
+            # TODO: Handle DB exceptions more carefully.
+            # Publish FAIL message to the Order Checkout saga replies queue.
+            message = {
+                "message": f"For item: '{removed_item_id}', there was a "
+                + "database error when trying to rollback the updated value."
+                + f"\n{e}",
+                "status": 400,
+            }
+            channel.basic_publish(
+                exchange="",
+                routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                body=json.dumps(message),
+            )
+            app.logger.warning(
+                f"For item: '{removed_item_id}', there was a database error "
+                + "when trying to rollback the updated value.\n{e}"
+            )
+            raise e
+    app.logger.info("Stock rollback was successful.")
+
+
 def process_message(ch, method, properties, body):
     """Callback function to process messages from RabbitMQ queue."""
     # Expected message type: {'item_id': id, 'quantity': n, ...}.
@@ -131,54 +163,41 @@ def process_message(ch, method, properties, body):
         # update stock, serialize and update database.
         item_entry.stock -= int(quantity)
         if item_entry.stock < 0:
-            # Rollback the stock to the already processed items.
-            for removed_item_id, removed_quantity in removed_items:
-                # Possible optimization: keep the StockValue object in the
-                # `removed_items` list.
-                removed_item_entry: StockValue = get_item_from_db(removed_item_id)
-                removed_item_entry.stock += int(removed_quantity)
-                try:
-                    db.set(removed_item_id, msgpack.encode(removed_item_entry))
-                except redis.exceptions.RedisError as e:
-                    # TODO: Handle DB exceptions more carefully.
-                    # Publish FAIL message to the Order Checkout saga replies queue.
-                    message = {
-                        "message": f"For item: '{removed_item_id}', there was a "
-                        + "database error when trying to rollback the updated value."
-                        + f"\n{e}",
-                        "status": 400,
-                    }
-                    channel.basic_publish(
-                        exchange="",
-                        routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                        body=json.dumps(message),
-                    )
-                    app.logger.warning(
-                        f"For item: '{removed_item_id}', there was a database error "
-                        + "when trying to rollback the updated value.\n{e}"
-                    )
-                    return
-            channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
-            message = {
-                "message": f"For item: '{item_id}', there was not enough stock.",
-                "status": 400,
-            }
-            channel.basic_publish(
-                exchange="",
-                routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                body=json.dumps(message),
-            )
-            app.logger.warning(
-                f"For item: '{item_id}', there was not enough stock. Thus, this "
-                + "order was no longer processed."
-            )
-            return
+            try:
+                # Rollback the stock to the already processed items.
+                rollback_stock(removed_items)
+
+                # If the rollback was successful, then publish event to the order
+                # checkout saga informing it that there was not enough stock for at
+                # least one item from the current order.
+                channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
+                message = {
+                    "message": f"For item: '{item_id}', there was not enough stock.",
+                    "status": 400,
+                }
+                channel.basic_publish(
+                    exchange="",
+                    routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                    body=json.dumps(message),
+                )
+                app.logger.info(
+                    f"For item: '{item_id}', there was not enough stock. Thus, this "
+                    + "order was no longer processed."
+                )
+                return
+            except redis.exceptions.RedisError:
+                # If the rollback was not successful, then return early.
+                # Order checkout saga was already informed that there was an error.
+                return
         try:
+            # If we have enough stock for the current `item_id`, then persist the
+            # stock subtraction.
             removed_items.append((item_id, quantity))
             db.set(item_id, msgpack.encode(item_entry))
             app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}.")
         except redis.exceptions.RedisError as e:
-            # Publish FAIL message to the Order Checkout saga replies queue.
+            # In case there was a database failure, Publish FAIL message to the Order
+            # Checkout saga replies queue.
             message = {
                 "message": f"For item: '{item_id}', there was a database error when "
                 + f"trying to save the updated value.\n{e}",
@@ -195,7 +214,8 @@ def process_message(ch, method, properties, body):
             )
             return
 
-    # Publish SUCCESS message to the Order Checkout saga replies queue.
+    # In case there was enough stock for the entire order, then publish SUCCESS
+    # message to the Order Checkout saga replies queue.
     message = {
         "message": "Stock was successfully updated based on the order.",
         "status": 200,
