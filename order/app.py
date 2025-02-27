@@ -19,9 +19,9 @@ DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
 GATEWAY_URL = os.environ["GATEWAY_URL"]
-STOCK_SERVICE_REQUESTS_QUEUE = "stock_service"
-PAYMENT_SERVICE_REQUESTS_QUEUE = "payment_service"
-ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = "order_checkout_saga_replies"
+STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
+PAYMENT_SERVICE_REQUESTS_QUEUE = os.environ["PAYMENT_SERVICE_REQUESTS_QUEUE"]
+ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = os.environ["ORDER_CHECKOUT_SAGA_REPLIES_QUEUE"]
 RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("order-service")
@@ -245,11 +245,17 @@ async def checkout(order_id: str):
 def process_received_message(ch, method, properties, body):
     """Callback function to process messages from RabbitMQ queue."""
     # TODO: Implement saga.
-    pass
+    message = json.loads(body.decode())
+    app.logger.info(message["message"] + " " + str(message["status"]))
+    return
 
 
 def consume_order_checkout_saga_replies_queue():
     """Continuously listen for messages on the order events queue."""
+
+    # The following two lines need to be kept here. (otherwise, system crashes)
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
 
     # Ensure the queue exists
     channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
