@@ -250,8 +250,6 @@ def process_received_message(ch, method, properties, body):
 
 def consume_order_checkout_saga_replies_queue():
     """Continuously listen for messages on the order events queue."""
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
 
     # Ensure the queue exists
     channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
