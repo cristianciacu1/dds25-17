@@ -124,7 +124,7 @@ def publish_message(message, status, order_id, user_id):
         "message": message.format(order_id=order_id, user_id=user_id),
         "order_id": order_id,
         "status": status,
-        "type": "payment"
+        "type": "payment",
     }
     channel.basic_publish(
         exchange="",
@@ -168,7 +168,7 @@ def process_message(ch, method, properties, body):
 
         # If successful and a saga action was performed then publish SUCCESS event to
         # the order checkout saga replies queue.
-        if not (message["type"]=="compensation"):
+        if message["type"] == "action":
             publish_message(
                 f"For order {order_id}, the user {user_id} was charged successfully.",
                 200,
@@ -177,8 +177,10 @@ def process_message(ch, method, properties, body):
             )
         else:
             # If a saga compensation action was performed, then just log the outcome.
-            app.logger.info(f"For order {order_id}, the user {user_id} was refunded "
-                            + "successfully.")
+            app.logger.info(
+                f"For order {order_id}, the user {user_id} was refunded "
+                + "successfully."
+            )
     except redis.exceptions.RedisError:
         # If the change in user's funds could not be persisted, then publish FAIL
         # event to the order checkout saga.
@@ -201,8 +203,9 @@ def consume_stock_service_requests_queue():
 
     # Start consuming messages.
     channel.basic_consume(
-        queue=PAYMENT_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message,
-        auto_ack=True
+        queue=PAYMENT_SERVICE_REQUESTS_QUEUE,
+        on_message_callback=process_message,
+        auto_ack=True,
     )
 
     app.logger.info("Started listening to payment service requests queue...")

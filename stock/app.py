@@ -146,7 +146,10 @@ def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
                 + "when trying to rollback the updated value.\n{e}"
             )
             raise e
-    app.logger.info(f"For order {order_id}, stock rollback was successful. Rolled back the stock for {len(removed_items)} items.")
+    app.logger.info(
+        f"For order {order_id}, stock rollback was successful. Rolled back the stock "
+        + f"for {len(removed_items)} items."
+    )
 
     connection.close()
 
@@ -159,10 +162,10 @@ def publish_message(message, status, order_id, item_id, e=None):
 
     """Helper function to publish messages to RabbitMQ"""
     response = {
-        "message": message.format(order_id=order_id, item_id=item_id,e=e),
+        "message": message.format(order_id=order_id, item_id=item_id, e=e),
         "order_id": order_id,
         "status": status,
-        "type": "stock"
+        "type": "stock",
     }
     channel.basic_publish(
         exchange="",
@@ -196,7 +199,13 @@ def process_message(ch, method, properties, body):
                 # If the rollback was successful, then publish event to the order
                 # checkout saga informing it that there was not enough stock for at
                 # least one item from the current order.
-                publish_message("For order {order_id}, there was not enough stock for item {item_id}.", 400, order_id, item_id)
+                publish_message(
+                    "For order {order_id}, there was not enough stock for item "
+                    + f"{item_id}.",
+                    400,
+                    order_id,
+                    item_id,
+                )
                 return
             except redis.exceptions.RedisError:
                 # If the rollback was not successful, then return early.
@@ -211,18 +220,30 @@ def process_message(ch, method, properties, body):
         except redis.exceptions.RedisError as e:
             # In case there was a database failure, Publish FAIL message to the Order
             # Checkout saga replies queue.
-            publish_message("For order {order_id}, there was a database error when "
-                + "trying to save the updated value for item {item_id}.\n{e}", 400, order_id, item_id, e)
+            publish_message(
+                "For order {order_id}, there was a database error when "
+                + "trying to save the updated value for item {item_id}.\n{e}",
+                400,
+                order_id,
+                item_id,
+                e,
+            )
             return
 
     # In case there was enough stock for the entire order, then publish SUCCESS
     # message to the Order Checkout saga replies queue.
-    if not (message["type"]=="compensation"):
-        publish_message("For order {order_id}, stock was successfully updated based on the order.", 200, order_id, None)
+    if message["type"] == "action":
+        publish_message(
+            "For order {order_id}, stock was successfully updated based on the order.",
+            200,
+            order_id,
+            None,
+        )
     else:
         # If a rollback was performed, then log the outcome.
-        app.logger.info(f"For order {order_id}, the stock was rolled back "
-                        + "successfully.")
+        app.logger.info(
+            f"For order {order_id}, the stock was rolled back " + "successfully."
+        )
 
 
 def consume_stock_service_requests_queue():
@@ -235,8 +256,9 @@ def consume_stock_service_requests_queue():
 
     # Start consuming messages.
     channel.basic_consume(
-        queue=STOCK_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message,
-        auto_ack=True
+        queue=STOCK_SERVICE_REQUESTS_QUEUE,
+        on_message_callback=process_message,
+        auto_ack=True,
     )
 
     app.logger.info("Started listening to stock service requests queue...")
