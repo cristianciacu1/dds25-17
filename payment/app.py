@@ -131,7 +131,7 @@ def publish_message(message, status, order_id, user_id):
         routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
         body=json.dumps(response),
     )
-    app.logger.info(response["message"])
+    app.logger.debug(response["message"])
 
 
 def process_message(ch, method, properties, body):
@@ -175,7 +175,7 @@ def process_message(ch, method, properties, body):
             )
         else:
             # If a saga compensation action was performed, then just log the outcome.
-            app.logger.info(
+            app.logger.debug(
                 f"For order {order_id}, the user {user_id} was refunded "
                 + "successfully."
             )
@@ -206,7 +206,7 @@ def consume_stock_service_requests_queue():
         auto_ack=True,
     )
 
-    app.logger.info("Started listening to payment service requests queue...")
+    app.logger.debug("Started listening to payment service requests queue...")
     channel.start_consuming()
 
 
@@ -218,7 +218,7 @@ consumer_thread.start()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=False)
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers

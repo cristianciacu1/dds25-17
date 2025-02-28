@@ -205,7 +205,7 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
         routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
         body=json.dumps(stock_service_message),
     )
-    app.logger.info(
+    app.logger.debug(
         f"For order {order_id}, rollback stock action pushed to the Stock Service."
     )
 
@@ -224,7 +224,7 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
         routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
         body=json.dumps(payment_service_message),
     )
-    app.logger.info(
+    app.logger.debug(
         f"For order {order_id}, refund user action pushed to the Payment Service."
     )
 
@@ -267,7 +267,7 @@ def syncCheckout(order_id: str):
 
 @app.post("/checkout/<order_id>")
 def checkout(order_id: str):
-    app.logger.info(f"Checking out {order_id}.")
+    app.logger.debug(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
 
     # If this order was already checked out (either in progress or completed), we
@@ -339,12 +339,12 @@ def process_received_message(ch, method, properties, body):
                 order_entry.payment_status = Status.ACCEPTED.value
                 if order_entry.stock_status == Status.ACCEPTED.value:
                     order_entry.order_status = Status.ACCEPTED.value
-                    app.logger.info(f"Order {order_id} was checked out successfully.")
+                    app.logger.debug(f"Order {order_id} was checked out successfully.")
                 elif order_entry.stock_status == Status.REJECTED.value:
                     rollback_payment_async(order_id, order_entry)
                     order_entry.order_status = Status.REJECTED.value
                     order_entry.payment_status = Status.REJECTED.value
-                    app.logger.info(
+                    app.logger.debug(
                         f"Order {order_id} was rejected since payment was accepted "
                         + "but stock was not."
                     )
@@ -355,12 +355,12 @@ def process_received_message(ch, method, properties, body):
                 if order_entry.stock_status == Status.ACCEPTED.value:
                     rollback_stock_async(order_id, order_entry.items)
                     order_entry.stock_status = Status.REJECTED.value
-                    app.logger.info(
+                    app.logger.debug(
                         f"Order {order_id} was rejected since stock was accepted but "
                         + "payment was not."
                     )
                 elif order_entry.stock_status == Status.REJECTED.value:
-                    app.logger.info(
+                    app.logger.debug(
                         f"Order {order_id} was rejected since both payment and stock "
                         + "were rejected."
                     )
@@ -374,12 +374,12 @@ def process_received_message(ch, method, properties, body):
                 order_entry.stock_status = Status.ACCEPTED.value
                 if order_entry.payment_status == Status.ACCEPTED.value:
                     order_entry.order_status = Status.ACCEPTED.value
-                    app.logger.info(f"Order {order_id} was checked out successfully.")
+                    app.logger.debug(f"Order {order_id} was checked out successfully.")
                 elif order_entry.payment_status == Status.REJECTED.value:
                     rollback_stock_async(order_id, order_entry.items)
                     order_entry.order_status = Status.REJECTED.value
                     order_entry.stock_status = Status.REJECTED.value
-                    app.logger.info(
+                    app.logger.debug(
                         f"Order {order_id} was rejected since stock was accepted but "
                         + "payment was not."
                     )
@@ -390,12 +390,12 @@ def process_received_message(ch, method, properties, body):
                 if order_entry.payment_status == Status.ACCEPTED.value:
                     rollback_payment_async(order_id, order_entry)
                     order_entry.payment_status = Status.REJECTED.value
-                    app.logger.info(
+                    app.logger.debug(
                         f"Order {order_id} was rejected since payment was accepted "
                         + "but stock was not."
                     )
                 elif order_entry.payment_status == Status.REJECTED.value:
-                    app.logger.info(
+                    app.logger.debug(
                         f"Order {order_id} was rejected since both payment and stock "
                         + "were rejected."
                     )
@@ -405,7 +405,7 @@ def process_received_message(ch, method, properties, body):
                 return abort(400, DB_ERROR_STR)
             return
         case _:
-            app.logger.info(f"Received unexpected message type: {message["type"]}.")
+            app.logger.debug(f"Received unexpected message type: {message["type"]}.")
             return
     return
 
@@ -427,7 +427,7 @@ def consume_order_checkout_saga_replies_queue():
         auto_ack=True,
     )
 
-    app.logger.info("Started listening to order checkout saga replies...")
+    app.logger.debug("Started listening to order checkout saga replies...")
     channel.start_consuming()
 
 
@@ -440,7 +440,7 @@ consumer_thread.start()
 
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    app.run(host="0.0.0.0", port=8000, debug=False)
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers
