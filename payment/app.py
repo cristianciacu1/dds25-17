@@ -16,6 +16,9 @@ PAYMENT_SERVICE_REQUESTS_QUEUE = os.environ["PAYMENT_SERVICE_REQUESTS_QUEUE"]
 ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = os.environ["ORDER_CHECKOUT_SAGA_REPLIES_QUEUE"]
 RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+channel = connection.channel()
+
 app = Flask("payment-service")
 
 db: redis.Redis = redis.Redis(
@@ -114,9 +117,6 @@ def remove_credit(user_id: str, amount: int):
 
 
 def publish_message(message, status, order_id, user_id):
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
     channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
 
     """Helper function to publish messages to RabbitMQ"""
@@ -132,8 +132,6 @@ def publish_message(message, status, order_id, user_id):
         body=json.dumps(response),
     )
     app.logger.info(response["message"])
-
-    connection.close()
 
 
 def process_message(ch, method, properties, body):

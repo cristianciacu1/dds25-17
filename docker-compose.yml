@@ -31,6 +31,9 @@ services:
     image: order:latest
     environment:
       - GATEWAY_URL=http://gateway:80
+    deploy:
+      mode: replicated
+      replicas: 6
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
@@ -48,6 +51,9 @@ services:
   stock-service:
     build: ./stock
     image: stock:latest
+    deploy:
+      mode: replicated
+      replicas: 6
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
@@ -65,6 +71,9 @@ services:
   payment-service:
     build: ./payment
     image: user:latest
+    deploy:
+      mode: replicated
+      replicas: 6
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env

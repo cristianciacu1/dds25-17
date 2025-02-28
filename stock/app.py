@@ -18,6 +18,9 @@ STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
 ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = os.environ["ORDER_CHECKOUT_SAGA_REPLIES_QUEUE"]
 RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+channel = connection.channel()
+
 app = Flask("stock-service")
 
 db: redis.Redis = redis.Redis(
@@ -155,9 +158,6 @@ def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
 
 
 def publish_message(message, status, order_id, item_id, e=None):
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
     channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
 
     """Helper function to publish messages to RabbitMQ"""
@@ -173,8 +173,6 @@ def publish_message(message, status, order_id, item_id, e=None):
         body=json.dumps(response),
     )
     app.logger.info(response["message"])
-
-    connection.close()
 
 
 def process_message(ch, method, properties, body):

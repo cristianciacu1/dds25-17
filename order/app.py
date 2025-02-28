@@ -15,7 +15,6 @@ import requests
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 
-
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
 
@@ -24,6 +23,9 @@ STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
 PAYMENT_SERVICE_REQUESTS_QUEUE = os.environ["PAYMENT_SERVICE_REQUESTS_QUEUE"]
 ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = os.environ["ORDER_CHECKOUT_SAGA_REPLIES_QUEUE"]
 RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
+
+connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+channel = connection.channel()
 
 app = Flask("order-service")
 
@@ -186,9 +188,6 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 
 def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in items:
         items_quantities[item_id] -= quantity
@@ -210,13 +209,8 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
         f"For order {order_id}, rollback stock action pushed to the Stock Service."
     )
 
-    connection.close()
-
 
 def rollback_payment_async(order_id: str, order_entry: OrderValue):
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
     # Publish refund user event to the Payment Service Queue.
     channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
     payment_service_message = {
@@ -233,9 +227,6 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
     app.logger.info(
         f"For order {order_id}, refund user action pushed to the Payment Service."
     )
-
-    connection.close()
-
 
 @app.post("/synccheckout/<order_id>")
 def syncCheckout(order_id: str):
@@ -275,10 +266,7 @@ def syncCheckout(order_id: str):
 
 
 @app.post("/checkout/<order_id>")
-async def checkout(order_id: str):
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
+def checkout(order_id: str):
     app.logger.info(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
 
@@ -333,7 +321,6 @@ async def checkout(order_id: str):
         body=json.dumps(payment_service_message),
     )
 
-    connection.close()
     return Response(
         f"The process of checking out order {order_id} has started. "
         + "Please check later the status of your order.",
