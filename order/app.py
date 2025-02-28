@@ -26,6 +26,8 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
 channel = connection.channel()
+channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
+channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
 
 app = Flask("order-service")
 
@@ -199,7 +201,7 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
     }
 
     # Publish subtract stock event to the Stock Service Queue.
-    channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
+    
     channel.basic_publish(
         exchange="",
         routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
@@ -212,7 +214,7 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
 
 def rollback_payment_async(order_id: str, order_entry: OrderValue):
     # Publish refund user event to the Payment Service Queue.
-    channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
+    
     payment_service_message = {
         "user_id": order_entry.user_id,
         "total_cost": -order_entry.total_cost,
@@ -267,6 +269,8 @@ def syncCheckout(order_id: str):
 
 @app.post("/checkout/<order_id>")
 def checkout(order_id: str):
+    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+    channel = connection.channel()
     app.logger.debug(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
 
@@ -321,6 +325,7 @@ def checkout(order_id: str):
         body=json.dumps(payment_service_message),
     )
 
+    connection.close()
     return Response(
         f"The process of checking out order {order_id} has started. "
         + "Please check later the status of your order.",
@@ -434,7 +439,7 @@ def consume_order_checkout_saga_replies_queue():
 # Start RabbitMQ Consumer in a separate thread.
 # Used for processing messages from checkout order saga replies.
 consumer_thread = threading.Thread(
-    target=consume_order_checkout_saga_replies_queue, daemon=True
+    target=consume_order_checkout_saga_replies_queue, daemon=False
 )
 consumer_thread.start()
 

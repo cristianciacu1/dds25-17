@@ -119,9 +119,6 @@ def remove_stock(item_id: str, amount: int):
 
 
 def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
     """Utility function to rollback all transactions from `removed_items`."""
     for removed_item_id, removed_quantity in removed_items:
         # Possible optimization: keep the StockValue object in the
@@ -153,8 +150,6 @@ def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
         f"For order {order_id}, stock rollback was successful. Rolled back the stock "
         + f"for {len(removed_items)} items."
     )
-
-    connection.close()
 
 
 def publish_message(message, status, order_id, item_id, e=None):
@@ -265,7 +260,7 @@ def consume_stock_service_requests_queue():
 
 # Start RabbitMQ Consumer in a separate thread.
 consumer_thread = threading.Thread(
-    target=consume_stock_service_requests_queue, daemon=True
+    target=consume_stock_service_requests_queue, daemon=False
 )
 consumer_thread.start()
 

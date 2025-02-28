@@ -212,7 +212,7 @@ def consume_stock_service_requests_queue():
 
 # Start RabbitMQ Consumer in a separate thread.
 consumer_thread = threading.Thread(
-    target=consume_stock_service_requests_queue, daemon=True
+    target=consume_stock_service_requests_queue, daemon=False
 )
 consumer_thread.start()
 
