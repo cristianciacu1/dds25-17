@@ -60,7 +60,7 @@ class RabbitMQHandler:
         except HTTPException:
             self.publish_message(
                 ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                "User {user_id} does not exist. Process stops here.",
+                f"User {user_id} does not exist. Process stops here.",
                 400,
                 order_id,
             )
