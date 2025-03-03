@@ -188,7 +188,6 @@ def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
                 response_message,
                 400,
                 order_id,
-                removed_item_id,
             )
             raise e
     app.logger.debug("Stock rollback was successful.")
