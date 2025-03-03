@@ -112,9 +112,8 @@ class RabbitMQHandler:
 
         # In case there was enough stock for the entire order, then publish SUCCESS
         # message to the Order Checkout saga replies queue.
-        if (
-            order_type == "action"
-        ):  # <--------- Do not forget about this when implementing checkout !!!
+        if order_type == "action":
+            # <--------- Do not forget about this when implementing checkout !!!
             response_message = (
                 f"For order {order_id}, stock was successfully updated.",
             )
