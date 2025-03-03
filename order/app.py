@@ -217,7 +217,7 @@ async def checkout(order_id: str):
     stock_service_message = {
         "order_id": order_id,
         "type": "action",
-        "items": items_quantities
+        "items": items_quantities,
     }
     channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
     channel.basic_publish(
