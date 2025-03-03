@@ -18,8 +18,6 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("payment-service")
 
-connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-channel = connection.channel()
 
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
@@ -40,6 +38,94 @@ class UserValue(Struct):
     credit: int
 
 
+class RabbitMQHandler:
+    def __init__(self):
+        self.connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+        self.channel = self.connection.channel()
+
+        # Declare queues
+        self.channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
+        self.channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
+
+    def callback(self, ch, method, properties, body):
+        """Callback function to process messages from RabbitMQ queue."""
+        # Expected message type: {'user_id': int, 'total_cost': int}.
+        message = json.loads(body.decode())
+        user_id = message["user_id"]
+        amount = message["total_cost"]
+        order_id = message["order_id"]
+
+        try:
+            user_entry: UserValue = get_user_from_db(user_id)
+        except HTTPException:
+            self.publish_message(
+                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                f"User {user_id} does not exist. Process stops here.",
+                400,
+                order_id,
+            )
+            return
+        user_entry.credit -= int(amount)
+        if user_entry.credit < 0:
+            # If the user does not have enough funds, then publish FAIL event to the
+            # order checkout saga.
+            self.publish_message(
+                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                f"For order {order_id}, the user {user_id} did not have enough funds.",
+                400,
+                order_id,
+            )
+            return
+        try:
+            # Try to persist the change in user's funds.
+            db.set(user_id, msgpack.encode(user_entry))
+
+            # If successful, then publish SUCCESS event to the order checkout saga
+            # replies queue.
+            self.publish_message(
+                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                f"For order {order_id}, the user {user_id} was charged successfully.",
+                200,
+                order_id,
+            )
+        except redis.exceptions.RedisError:
+            # If the change in user's funds could not be persisted, then publish FAIL
+            # event to the order checkout saga.
+            self.publish_message(
+                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                f"For order {order_id}, the user {user_id} has enough funds, but the "
+                + "change in their funds could not be persisted in the database.",
+                400,
+                order_id,
+            )
+
+    def publish_message(self, queue, message, status_code, order_id):
+        response = {
+            "message": message,
+            "status": status_code,
+            "order_id": order_id,
+            "type": "payment",
+        }
+        self.channel.basic_publish(
+            exchange="",
+            routing_key=queue,
+            body=json.dumps(response),
+        )
+        app.logger.debug(message)
+
+    def start_consuming(self):
+        self.channel.basic_consume(
+            queue=PAYMENT_SERVICE_REQUESTS_QUEUE,
+            on_message_callback=self.callback,
+            auto_ack=True,
+        )
+        app.logger.debug("Started listening to stock service requests...")
+        self.channel.start_consuming()
+
+    def close_connection(self):
+        self.connection.close()
+
+
 def get_user_from_db(user_id: str) -> UserValue | None:
     try:
         # get serialized data
@@ -52,6 +138,20 @@ def get_user_from_db(user_id: str) -> UserValue | None:
         # if user does not exist in the database; abort
         abort(400, f"User: {user_id} not found!")
     return entry
+
+
+# Create a single instance of RabbitMQHandler
+rabbitmq_handler = RabbitMQHandler()
+
+
+# Run consumer in a separate thread
+def start_consumer():
+    rabbitmq_handler.start_consuming()
+
+
+# Start RabbitMQ Consumer in a separate thread.
+consumer_thread = threading.Thread(target=start_consumer, daemon=True)
+consumer_thread.start()
 
 
 @app.post("/create_user")
@@ -116,93 +216,8 @@ def remove_credit(user_id: str, amount: int):
     )
 
 
-def publish_message(message, status, order_id, user_id):
-    """Helper function to publish messages to RabbitMQ"""
-    response = {
-        "message": message.format(order_id=order_id, user_id=user_id),
-        "status": status,
-    }
-    channel.basic_publish(
-        exchange="",
-        routing_key=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-        body=json.dumps(response),
-    )
-    app.logger.info(response["message"])
-
-
-def process_message(ch, method, properties, body):
-    """Callback function to process messages from RabbitMQ queue."""
-
-    channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
-
-    # Expected message type: {'user_id': int, 'total_cost': int}.
-    message = json.loads(body.decode())
-    user_id = message["user_id"]
-    amount = message["total_cost"]
-    order_id = message["order_id"]
-
-    try:
-        user_entry: UserValue = get_user_from_db(user_id)
-    except HTTPException:
-        publish_message(
-            "User {user_id} does not exist. Process stops here.", 400, order_id, user_id
-        )
-        return
-    user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
-        # If the user does not have enough funds, then publish FAIL event to the
-        # order checkout saga.
-        publish_message(
-            f"For order {order_id}, the user {user_id} did not have enough funds.",
-            400,
-            order_id,
-            user_id,
-        )
-        return
-    try:
-        # Try to persist the change in user's funds.
-        db.set(user_id, msgpack.encode(user_entry))
-
-        # If successful, then publish SUCCESS event to the order checkout saga
-        # replies queue.
-        publish_message(
-            f"For order {order_id}, the user {user_id} was charged successfully.",
-            200,
-            order_id,
-            user_id,
-        )
-    except redis.exceptions.RedisError:
-        # If the change in user's funds could not be persisted, then publish FAIL
-        # event to the order checkout saga.
-        publish_message(
-            f"For order {order_id}, the user {user_id} has enough funds, but the "
-            + "change in their funds could not be persisted in the database.",
-            400,
-            order_id,
-            user_id,
-        )
-
-
-def consume_stock_service_requests_queue():
-    """Continuously listen for messages on the order events queue."""
-
-    # Ensure the queue exists.
-    channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
-
-    # Start consuming messages.
-    channel.basic_consume(
-        queue=PAYMENT_SERVICE_REQUESTS_QUEUE, on_message_callback=process_message
-    )
-
-    app.logger.info("Started listening to payment service requests queue...")
-    channel.start_consuming()
-
-
-# Start RabbitMQ Consumer in a separate thread.
-consumer_thread = threading.Thread(
-    target=consume_stock_service_requests_queue, daemon=True
-)
-consumer_thread.start()
+atexit.register(close_db_connection)
+atexit.register(rabbitmq_handler.close_connection)
 
 
 if __name__ == "__main__":
