@@ -70,8 +70,8 @@ class RabbitMQHandler:
                     # checkout saga informing it that there was not enough stock for at
                     # least one item from the current order.
                     response_message = (
-                        f"For order {order_id}, there was not"
-                        + "enough stock for item {item_id}."
+                        f"For order {order_id}, there was not "
+                        + f"enough stock for item {item_id}."
                     )
                     self.publish_message(
                         ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
