@@ -214,11 +214,16 @@ async def checkout(order_id: str):
         items_quantities[item_id] += quantity
 
     # Publish subtract stock event to the Stock Service Queue.
+    stock_service_message = {
+        "order_id": order_id,
+        "type": "action",
+        "items": items_quantities
+    }
     channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
     channel.basic_publish(
         exchange="",
         routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
-        body=json.dumps(items_quantities),
+        body=json.dumps(stock_service_message),
     )
     app.logger.info("Subtract stock action pushed to the Stock Service.")
 
