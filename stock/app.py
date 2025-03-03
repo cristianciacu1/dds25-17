@@ -78,7 +78,6 @@ class RabbitMQHandler:
                         response_message,
                         400,
                         order_id,
-                        item_id,
                     )
                     return
                 except redis.exceptions.RedisError:
@@ -106,7 +105,6 @@ class RabbitMQHandler:
                     response_message,
                     400,
                     order_id,
-                    item_id,
                 )
                 return
 
@@ -122,7 +120,6 @@ class RabbitMQHandler:
                 response_message,
                 200,
                 order_id,
-                item_id,
             )
         else:
             # If a rollback was performed, then log the outcome.
@@ -130,12 +127,11 @@ class RabbitMQHandler:
                 f"For order {order_id}, the stock was rolled back successfully."
             )
 
-    def publish_message(self, queue, message, status_code, order_id, item_id):
+    def publish_message(self, queue, message, status_code, order_id):
         response = {
             "message": message,
             "status": status_code,
             "order_id": order_id,
-            "item_id": item_id,
             "type": "stock",
         }
         self.channel.basic_publish(

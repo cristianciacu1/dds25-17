@@ -63,7 +63,6 @@ class RabbitMQHandler:
                 "User {user_id} does not exist. Process stops here.",
                 400,
                 order_id,
-                user_id,
             )
             return
         user_entry.credit -= int(amount)
@@ -75,7 +74,6 @@ class RabbitMQHandler:
                 f"For order {order_id}, the user {user_id} did not have enough funds.",
                 400,
                 order_id,
-                user_id,
             )
             return
         try:
@@ -89,7 +87,6 @@ class RabbitMQHandler:
                 f"For order {order_id}, the user {user_id} was charged successfully.",
                 200,
                 order_id,
-                user_id,
             )
         except redis.exceptions.RedisError:
             # If the change in user's funds could not be persisted, then publish FAIL
@@ -100,15 +97,13 @@ class RabbitMQHandler:
                 + "change in their funds could not be persisted in the database.",
                 400,
                 order_id,
-                user_id,
             )
 
-    def publish_message(self, queue, message, status_code, order_id, user_id):
+    def publish_message(self, queue, message, status_code, order_id):
         response = {
             "message": message,
             "status": status_code,
             "order_id": order_id,
-            "user_id": user_id,
             "type": "payment",
         }
         self.channel.basic_publish(
