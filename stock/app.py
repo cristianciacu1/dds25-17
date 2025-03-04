@@ -12,6 +12,9 @@ from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 import redis.exceptions
 
+from pottery import Redlock
+import time
+
 
 DB_ERROR_STR = "DB error"
 STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
@@ -58,71 +61,92 @@ class RabbitMQHandler:
         # subtracted stock from for rollback purposes.
         removed_items: list[tuple[str, int]] = []
         for item_id, quantity in order_items_quantities.items():
-            item_entry: StockValue = get_item_from_db(item_id)
-            # update stock, serialize and update database.
-            item_entry.stock -= int(quantity)
-            if item_entry.stock < 0:
-                try:
-                    # Rollback the stock to the already processed items.
-                    rollback_stock(order_id, removed_items)
+            # Create a unique lock key for this specific item.
+            lock_key = f"stock_lock:{item_id}"
 
-                    # If the rollback was successful, then publish event to the order
-                    # checkout saga informing it that there was not enough stock for at
-                    # least one item from the current order.
-                    response_message = (
-                        f"For order {order_id}, there was not "
-                        + f"enough stock for item {item_id}."
-                    )
-                    self.publish_message(
-                        method,
-                        properties,
-                        response_message,
-                        400,
-                        order_id,
-                    )
-                    return
-                except redis.exceptions.RedisError as e:
-                    # If the rollback was not successful, then return early.
-                    response_message = f"For order {order_id}, there was a "
-                    +"database error when trying to rollback the updated value for "
-                    +f"an item. \n{e}"
-                    self.publish_message(
-                        method,
-                        properties,
-                        response_message,
-                        400,
-                        order_id,
-                    )
-                    return
-            try:
-                # If we have enough stock for the current `item_id`, then persist the
-                # stock subtraction.
-                removed_items.append((item_id, quantity))
-                db.set(item_id, msgpack.encode(item_entry))
-                app.logger.debug(
-                    f"For order {order_id}, stock of item {item_id} was updated "
-                    + f"to: {item_entry.stock}."
-                )
-            except redis.exceptions.RedisError as e:
-                # In case there was a database failure, Publish FAIL message to the
-                # Order Checkout saga replies queue.
-                response_message = (
-                    f"For order {order_id}, there was a database error when "
-                    + f"trying to save the updated value for item {item_id}.\n{e}"
-                )
+            # Initialize Redlock for this item.
+            lock = Redlock(key=lock_key, masters={db}, auto_release_time=10)
+
+            if lock.acquire():
+                try:
+                    item_entry: StockValue = get_item_from_db(item_id)
+                    # update stock, serialize and update database.
+                    item_entry.stock -= int(quantity)
+                    if item_entry.stock < 0:
+                        try:
+                            # Rollback the stock to the already processed items.
+                            rollback_stock(order_id, removed_items, method, properties)
+
+                            # If the rollback was successful, then publish event to the order
+                            # checkout saga informing it that there was not enough stock for at
+                            # least one item from the current order.
+                            response_message = (
+                                f"For order {order_id}, there was not "
+                                + f"enough stock for item {item_id}."
+                            )
+                            self.publish_message(
+                                method,
+                                properties,
+                                response_message,
+                                400,
+                                order_id,
+                            )
+                            return
+                        except redis.exceptions.RedisError as e:
+                            # If the rollback was not successful, then return early.
+                            response_message = f"For order {order_id}, there was a "
+                            +"database error when trying to rollback the updated value for "
+                            +f"an item. \n{e}"
+                            self.publish_message(
+                                method,
+                                properties,
+                                response_message,
+                                400,
+                                order_id,
+                            )
+                            return
+                    try:
+                        # If we have enough stock for the current `item_id`, then persist the
+                        # stock subtraction.
+                        removed_items.append((item_id, quantity))
+                        db.set(item_id, msgpack.encode(item_entry))
+                        app.logger.debug(
+                            f"For order {order_id}, stock of item {item_id} was updated "
+                            + f"to: {item_entry.stock}."
+                        )
+                    except redis.exceptions.RedisError as e:
+                        # In case there was a database failure, Publish FAIL message to the
+                        # Order Checkout saga replies queue.
+                        response_message = (
+                            f"For order {order_id}, there was a database error when "
+                            + f"trying to save the updated value for item {item_id}.\n{e}"
+                        )
+                        self.publish_message(
+                            method,
+                            properties,
+                            response_message,
+                            400,
+                            order_id,
+                        )
+                        return
+                finally:
+                    # Release lock.
+                    lock.release()
+            else:
+                # If all attempts fail, publish a failure message
+                response_message = f"Could not acquire lock for item {item_id}. Too many concurrent requests."
                 self.publish_message(
                     method,
                     properties,
                     response_message,
-                    400,
+                    500,
                     order_id,
                 )
                 return
-
+                    
         # In case there was enough stock for the entire order, then publish SUCCESS
         # message to the Order Checkout saga replies queue.
         if order_type == "action":
-            # <--------- Do not forget about this when implementing checkout !!!
             response_message = f"For order {order_id}, stock was successfully updated."
             self.publish_message(
                 method,
@@ -136,6 +160,8 @@ class RabbitMQHandler:
             app.logger.debug(
                 f"For order {order_id}, the stock was rolled back successfully."
             )
+        return
+
 
     def publish_message(
         self,
@@ -195,19 +221,51 @@ def get_item_from_db(item_id: str) -> StockValue | None:
     return entry
 
 
-def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
+def rollback_stock(order_id: str, removed_items: list[tuple[str, int]], method, properties):
     """Utility function to rollback all transactions from `removed_items`."""
+    # Implement lock acquisition with retries
+    max_attempts = 5  # Maximum number of lock attempts
+    retry_delay = 0.1  # Delay between retry attempts in seconds
     for removed_item_id, removed_quantity in removed_items:
-        # Possible optimization: keep the StockValue object in the
-        # `removed_items` list.
-        removed_item_entry: StockValue = get_item_from_db(removed_item_id)
-        removed_item_entry.stock += int(removed_quantity)
-        try:
-            db.set(removed_item_id, msgpack.encode(removed_item_entry))
-        except redis.exceptions.RedisError as e:
-            # TODO: Handle DB exceptions more carefully.
-            raise e
-    app.logger.debug("Stock rollback was successful.")
+        # Create a unique lock key for this specific item.
+        lock_key = f"stock_lock:{removed_item_id}"
+
+        for attempt in range(max_attempts):
+            # Initialize Redlock for this item.
+            lock = Redlock(key=lock_key, masters={db}, auto_release_time=10)
+
+            if lock.acquire():
+                try:
+                    # Possible optimization: keep the StockValue object in the
+                    # `removed_items` list.
+                    removed_item_entry: StockValue = get_item_from_db(removed_item_id)
+                    removed_item_entry.stock += int(removed_quantity)
+                    try:
+                        db.set(removed_item_id, msgpack.encode(removed_item_entry))
+                        app.logger.debug(f"For order {order_id}, stock rollback was successful.")
+                    except redis.exceptions.RedisError as e:
+                        # TODO: Handle DB exceptions more carefully.
+                        raise e
+                finally:
+                    # Release lock.
+                    lock.release()
+                    return
+            else:
+                # If lock acquisition fails, wait and retry
+                if attempt < max_attempts - 1:
+                    app.logger.debug(f"Lock acquisition failed for order {order_id}. Retrying...")
+                    time.sleep(retry_delay)
+                else:
+                    # If all attempts fail, publish a failure message
+                    response_message = f"Could not acquire lock for order {order_id}. Too many concurrent requests."
+                    rabbitmq_handler.publish_message(
+                        method,
+                        properties,
+                        response_message,
+                        500,
+                        order_id,
+                    )
+                    return
 
 
 # Create a single instance of RabbitMQHandler

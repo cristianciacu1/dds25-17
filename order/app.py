@@ -209,6 +209,9 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
         item1_id = random.randint(0, n_items - 1)
         item2_id = random.randint(0, n_items - 1)
         value = OrderValue(
+            stock_status=Status.IDLE.value,
+            payment_status=Status.IDLE.value,
+            order_status=Status.IDLE.value,
             paid=False,
             items=[(f"{item1_id}", 1), (f"{item2_id}", 1)],
             user_id=f"{user_id}",
