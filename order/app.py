@@ -3,8 +3,8 @@ import os
 import atexit
 import random
 import uuid
-import threading
 from collections import defaultdict
+from enum import Enum
 
 import json
 import pika
@@ -26,9 +26,6 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("order-service")
 
-connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-channel = connection.channel()
-
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],
     port=int(os.environ["REDIS_PORT"]),
@@ -41,14 +38,61 @@ def close_db_connection():
     db.close()
 
 
-atexit.register(close_db_connection)
-
-
 class OrderValue(Struct):
+    stock_status: int
+    payment_status: int
+    order_status: int
     paid: bool
     items: list[tuple[str, int]]
     user_id: str
     total_cost: int
+
+
+class Status(Enum):
+    IDLE = 0
+    PENDING = 1
+    ACCEPTED = 2
+    REJECTED = 3
+
+
+class RabbitMQHandler:
+    def __init__(self):
+        self.connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+        self.channel = self.connection.channel()
+
+        result = self.channel.queue_declare(queue="", exclusive=True)
+        self.callback_queue = result.method.queue
+
+        self.channel.basic_consume(
+            queue=self.callback_queue, on_message_callback=self.callback, auto_ack=True
+        )
+
+        self.response = None
+        self.corr_id = None
+
+    def callback(self, ch, method, properties, body):
+        """Callback function to process messages from RabbitMQ queue."""
+        if self.corr_id == properties.correlation_id:
+            self.response = json.loads(body.decode())
+
+    def call(self, queue, request_body):
+        self.response = None
+        self.corr_id = str(uuid.uuid4())
+        self.channel.basic_publish(
+            exchange="",
+            routing_key=queue,
+            properties=pika.BasicProperties(
+                reply_to=self.callback_queue,
+                correlation_id=self.corr_id,
+            ),
+            body=json.dumps(request_body),
+        )
+        while self.response is None:
+            self.connection.process_data_events(time_limit=None)
+        return self.response
+
+    def close_connection(self):
+        self.connection.close()
 
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
@@ -65,11 +109,85 @@ def get_order_from_db(order_id: str) -> OrderValue | None:
     return entry
 
 
+def send_post_request(url: str):
+    try:
+        response = requests.post(url)
+    except requests.exceptions.RequestException:
+        abort(400, REQ_ERROR_STR)
+    else:
+        return response
+
+
+def send_get_request(url: str):
+    try:
+        response = requests.get(url)
+    except requests.exceptions.RequestException:
+        abort(400, REQ_ERROR_STR)
+    else:
+        return response
+
+
+def rollback_stock(removed_items: list[tuple[str, int]]):
+    for item_id, quantity in removed_items:
+        send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
+
+
+def rollback_stock_async(order_id: str, items: list[tuple[str, int]]):
+    """Publish a rollback stock event to the Stock Service Queue."""
+    items_quantities: dict[str, int] = defaultdict(int)
+    for item_id, quantity in items:
+        items_quantities[item_id] -= quantity
+
+    stock_service_message = {
+        "items": items_quantities,
+        "order_id": order_id,
+        "type": "compensation",
+    }
+    rabbitmq_handler.channel.basic_publish(
+        exchange="",
+        routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
+        body=json.dumps(stock_service_message),
+    )
+    app.logger.debug(
+        f"For order {order_id}, rollback stock action pushed to the Stock Service."
+    )
+
+
+def rollback_payment_async(order_id: str, order_entry: OrderValue):
+    """Publish refund user event to the Payment Service Queue."""
+    payment_service_message = {
+        "user_id": order_entry.user_id,
+        "total_cost": -order_entry.total_cost,
+        "order_id": order_id,
+        "type": "compensation",
+    }
+    rabbitmq_handler.channel.basic_publish(
+        exchange="",
+        routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
+        body=json.dumps(payment_service_message),
+    )
+    app.logger.debug(
+        f"For order {order_id}, refund user action pushed to the Payment Service."
+    )
+
+
+# Create a single instance of RabbitMQHandler
+rabbitmq_handler = RabbitMQHandler()
+
+
 @app.post("/create/<user_id>")
 def create_order(user_id: str):
     key = str(uuid.uuid4())
     value = msgpack.encode(
-        OrderValue(paid=False, items=[], user_id=user_id, total_cost=0)
+        OrderValue(
+            stock_status=Status.IDLE.value,
+            payment_status=Status.IDLE.value,
+            order_status=Status.IDLE.value,
+            paid=False,
+            items=[],
+            user_id=user_id,
+            total_cost=0,
+        )
     )
     try:
         db.set(key, value)
@@ -114,30 +232,15 @@ def find_order(order_id: str):
     return jsonify(
         {
             "order_id": order_id,
+            "stock_status": order_entry.stock_status,
+            "payment_status": order_entry.payment_status,
+            "order_status": order_entry.order_status,
             "paid": order_entry.paid,
             "items": order_entry.items,
             "user_id": order_entry.user_id,
             "total_cost": order_entry.total_cost,
         }
     )
-
-
-def send_post_request(url: str):
-    try:
-        response = requests.post(url)
-    except requests.exceptions.RequestException:
-        abort(400, REQ_ERROR_STR)
-    else:
-        return response
-
-
-def send_get_request(url: str):
-    try:
-        response = requests.get(url)
-    except requests.exceptions.RequestException:
-        abort(400, REQ_ERROR_STR)
-    else:
-        return response
 
 
 @app.post("/addItem/<order_id>/<item_id>/<quantity>")
@@ -160,11 +263,6 @@ def add_item(order_id: str, item_id: str, quantity: int):
         f"price updated to: {order_entry.total_cost}",
         status=200,
     )
-
-
-def rollback_stock(removed_items: list[tuple[str, int]]):
-    for item_id, quantity in removed_items:
-        send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
 
 @app.post("/synccheckout/<order_id>")
@@ -205,84 +303,107 @@ def syncCheckout(order_id: str):
 
 
 @app.post("/checkout/<order_id>")
-async def checkout(order_id: str):
+def checkout(order_id: str):
     app.logger.debug(f"Checking out {order_id}.")
     order_entry: OrderValue = get_order_from_db(order_id)
+
+    # If this order was already checked out (either in progress or completed), we
+    # should avoid checking it out again.
+    if order_entry.order_status != Status.IDLE.value:
+        app.logger.debug(
+            f"The process of checking out order {order_id} has already started. This "
+            + "request is aborted."
+        )
+        return Response(
+            f"The process of checking out order {order_id} has already started. This "
+            + "request is aborted.",
+            status=400,
+        )
+
+    # Update the status of all three steps to PENDING, indicating that the checkout
+    # procedure was initiated.
+    order_entry.stock_status = Status.PENDING.value
+    order_entry.order_status = Status.PENDING.value
+    order_entry.payment_status = Status.PENDING.value
+    try:
+        db.set(order_id, msgpack.encode(order_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+
     # get the quantity per item.
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in order_entry.items:
         items_quantities[item_id] += quantity
 
-    # Publish subtract stock event to the Stock Service Queue.
+    # Send subtract stock event to the Stock Service via RPC and wait until it replies.
     stock_service_message = {
         "order_id": order_id,
-        "type": "action",
         "items": items_quantities,
+        "type": "action",
     }
-    channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
-    channel.basic_publish(
-        exchange="",
-        routing_key=STOCK_SERVICE_REQUESTS_QUEUE,
-        body=json.dumps(stock_service_message),
+    stock_service_response = rabbitmq_handler.call(
+        STOCK_SERVICE_REQUESTS_QUEUE, stock_service_message
     )
-    app.logger.info("Subtract stock action pushed to the Stock Service.")
+    app.logger.debug(
+        f"Stock Service replied to the subtract stock action for order {order_id}."
+    )
 
-    # Publish charge user event to the Payment Service Queue.
-    channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE)
+    # Send charge user event to the Payment Service via RPC and wait until it replies.
     payment_service_message = {
         "user_id": order_entry.user_id,
         "total_cost": order_entry.total_cost,
         "order_id": order_id,
+        "type": "action",
     }
-    channel.basic_publish(
-        exchange="",
-        routing_key=PAYMENT_SERVICE_REQUESTS_QUEUE,
-        body=json.dumps(payment_service_message),
+    payment_service_response = rabbitmq_handler.call(
+        PAYMENT_SERVICE_REQUESTS_QUEUE, payment_service_message
     )
-    app.logger.info("Charge user action pushed to the Payment Service.")
-
-    return Response(
-        f"The process of checking out order {order_id} has started. "
-        + "Please check later the status of your order.",
-        status=200,
+    app.logger.debug(
+        f"Payment Service replied to the charge user action for order {order_id}."
     )
 
+    # Order Checkout Saga.
+    response_status_from_stock_service = stock_service_response["status"]
+    response_status_from_payment_service = payment_service_response["status"]
 
-def process_received_message(ch, method, properties, body):
-    """Callback function to process messages from RabbitMQ queue."""
-    # TODO: Implement saga.
-    message = json.loads(body.decode())
-    app.logger.info(message["message"] + " " + str(message["status"]))
-    return
+    if (
+        response_status_from_stock_service == 200
+        and response_status_from_payment_service == 200
+    ):
+        order_entry.stock_status = Status.ACCEPTED.value
+        order_entry.payment_status = Status.ACCEPTED.value
+        order_entry.order_status = Status.ACCEPTED.value
+        app.logger.debug(f"Order {order_id} was checked out successfully.")
+    else:
+        order_entry.stock_status = Status.REJECTED.value
+        order_entry.payment_status = Status.REJECTED.value
+        order_entry.order_status = Status.REJECTED.value
+        if response_status_from_stock_service == 200:
+            # Stock update was successful, but payment has failed.
+            # Rollback the stock action.
+            rollback_stock_async(order_id, order_entry.items)
+        if response_status_from_payment_service == 200:
+            # Payment was successful, but stock update has failed. Refund the user.
+            rollback_payment_async(order_id, order_entry)
+    try:
+        db.set(order_id, msgpack.encode(order_entry))
+    except redis.exceptions.RedisError:
+        return abort(400, DB_ERROR_STR)
+
+    if order_entry.order_status == Status.ACCEPTED.value:
+        return Response(
+            f"Order {order_id} was checked out successfully.",
+            status=200,
+        )
+    else:
+        return Response(
+            f"Order {order_id} was not checked out successfully.",
+            status=400,
+        )
 
 
-def consume_order_checkout_saga_replies_queue():
-    """Continuously listen for messages on the order events queue."""
-
-    # The following two lines need to be kept here. (otherwise, system crashes)
-    connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
-    channel = connection.channel()
-
-    # Ensure the queue exists
-    channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
-
-    # Start consuming messages
-    channel.basic_consume(
-        queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-        on_message_callback=process_received_message,
-    )
-
-    app.logger.info("Started listening to order checkout saga replies...")
-    channel.start_consuming()
-
-
-# Start RabbitMQ Consumer in a separate thread.
-# Used for processing messages from checkout order saga replies.
-consumer_thread = threading.Thread(
-    target=consume_order_checkout_saga_replies_queue, daemon=True
-)
-consumer_thread.start()
-
+atexit.register(close_db_connection)
+# atexit.register(rabbitmq_handler.close_connection)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)

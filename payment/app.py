@@ -54,12 +54,14 @@ class RabbitMQHandler:
         user_id = message["user_id"]
         amount = message["total_cost"]
         order_id = message["order_id"]
+        order_type = message["type"]
 
         try:
             user_entry: UserValue = get_user_from_db(user_id)
         except HTTPException:
             self.publish_message(
-                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                method,
+                properties,
                 f"User {user_id} does not exist. Process stops here.",
                 400,
                 order_id,
@@ -70,7 +72,8 @@ class RabbitMQHandler:
             # If the user does not have enough funds, then publish FAIL event to the
             # order checkout saga.
             self.publish_message(
-                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                method,
+                properties,
                 f"For order {order_id}, the user {user_id} did not have enough funds.",
                 400,
                 order_id,
@@ -80,47 +83,78 @@ class RabbitMQHandler:
             # Try to persist the change in user's funds.
             db.set(user_id, msgpack.encode(user_entry))
 
-            # If successful, then publish SUCCESS event to the order checkout saga
-            # replies queue.
-            self.publish_message(
-                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                f"For order {order_id}, the user {user_id} was charged successfully.",
-                200,
-                order_id,
-            )
+            # If successful and a saga action was performed then publish SUCCESS
+            # event to the order checkout saga replies queue.
+            if order_type == "action":
+                self.publish_message(
+                    method,
+                    properties,
+                    (
+                        f"For order {order_id}, the user {user_id} was "
+                        + "charged successfully."
+                    ),
+                    200,
+                    order_id,
+                )
+            else:
+                # If a saga compensation action was performed,
+                # then just log the outcome.
+                app.logger.debug(
+                    f"For order {order_id}, the user {user_id} was refunded "
+                    + "successfully."
+                )
         except redis.exceptions.RedisError:
             # If the change in user's funds could not be persisted, then publish FAIL
             # event to the order checkout saga.
             self.publish_message(
-                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                method,
+                properties,
                 f"For order {order_id}, the user {user_id} has enough funds, but the "
                 + "change in their funds could not be persisted in the database.",
                 400,
                 order_id,
             )
 
-    def publish_message(self, queue, message, status_code, order_id):
+    def publish_message(
+        self,
+        method,
+        props,
+        message,
+        status_code,
+        order_id,
+        queue=None,
+        is_compensation=False,
+    ):
         response = {
             "message": message,
             "status": status_code,
             "order_id": order_id,
             "type": "payment",
         }
-        self.channel.basic_publish(
-            exchange="",
-            routing_key=queue,
-            body=json.dumps(response),
-        )
+        if not is_compensation:
+            self.channel.basic_publish(
+                exchange="",
+                routing_key=props.reply_to,
+                properties=pika.BasicProperties(correlation_id=props.correlation_id),
+                body=json.dumps(response),
+            )
+            self.channel.basic_ack(delivery_tag=method.delivery_tag)
+        else:
+            self.channel.basic_publish(
+                exchange="",
+                routing_key=queue,
+                body=json.dumps(response),
+            )
         app.logger.debug(message)
 
     def start_consuming(self):
+        # self.channel.basic_qos(prefetch_count=1)
         self.channel.basic_consume(
             queue=PAYMENT_SERVICE_REQUESTS_QUEUE,
             on_message_callback=self.callback,
-            auto_ack=True,
         )
-        app.logger.debug("Started listening to stock service requests...")
         self.channel.start_consuming()
+        app.logger.debug("Started listening to stock service requests...")
 
     def close_connection(self):
         self.connection.close()
@@ -217,7 +251,7 @@ def remove_credit(user_id: str, amount: int):
 
 
 atexit.register(close_db_connection)
-atexit.register(rabbitmq_handler.close_connection)
+# atexit.register(rabbitmq_handler.close_connection)
 
 
 if __name__ == "__main__":
