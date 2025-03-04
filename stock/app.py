@@ -74,15 +74,25 @@ class RabbitMQHandler:
                         + f"enough stock for item {item_id}."
                     )
                     self.publish_message(
-                        ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                        method,
+                        properties,
                         response_message,
                         400,
                         order_id,
                     )
                     return
-                except redis.exceptions.RedisError:
+                except redis.exceptions.RedisError as e:
                     # If the rollback was not successful, then return early.
-                    # Order checkout saga was already informed that there was an error.
+                    response_message = f"For order {order_id}, there was a "
+                    +"database error when trying to rollback the updated value for "
+                    +f"an item. \n{e}"
+                    self.publish_message(
+                        method,
+                        properties,
+                        response_message,
+                        400,
+                        order_id,
+                    )
                     return
             try:
                 # If we have enough stock for the current `item_id`, then persist the
@@ -90,7 +100,7 @@ class RabbitMQHandler:
                 removed_items.append((item_id, quantity))
                 db.set(item_id, msgpack.encode(item_entry))
                 app.logger.debug(
-                    f"For order {order_id}, stock of item {item_id} was updated"
+                    f"For order {order_id}, stock of item {item_id} was updated "
                     + f"to: {item_entry.stock}."
                 )
             except redis.exceptions.RedisError as e:
@@ -101,7 +111,8 @@ class RabbitMQHandler:
                     + f"trying to save the updated value for item {item_id}.\n{e}"
                 )
                 self.publish_message(
-                    ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                    method,
+                    properties,
                     response_message,
                     400,
                     order_id,
@@ -112,11 +123,10 @@ class RabbitMQHandler:
         # message to the Order Checkout saga replies queue.
         if order_type == "action":
             # <--------- Do not forget about this when implementing checkout !!!
-            response_message = (
-                f"For order {order_id}, stock was successfully updated.",
-            )
+            response_message = f"For order {order_id}, stock was successfully updated."
             self.publish_message(
-                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
+                method,
+                properties,
                 response_message,
                 200,
                 order_id,
@@ -127,28 +137,45 @@ class RabbitMQHandler:
                 f"For order {order_id}, the stock was rolled back successfully."
             )
 
-    def publish_message(self, queue, message, status_code, order_id):
+    def publish_message(
+        self,
+        method,
+        props,
+        message,
+        status_code,
+        order_id,
+        queue=None,
+        is_compensation=False,
+    ):
         response = {
             "message": message,
             "status": status_code,
             "order_id": order_id,
             "type": "stock",
         }
-        self.channel.basic_publish(
-            exchange="",
-            routing_key=queue,
-            body=json.dumps(response),
-        )
+        if not is_compensation:
+            self.channel.basic_publish(
+                exchange="",
+                routing_key=props.reply_to,
+                properties=pika.BasicProperties(correlation_id=props.correlation_id),
+                body=json.dumps(response),
+            )
+            self.channel.basic_ack(delivery_tag=method.delivery_tag)
+        else:
+            self.channel.basic_publish(
+                exchange="",
+                routing_key=queue,
+                body=json.dumps(response),
+            )
         app.logger.debug(message)
 
     def start_consuming(self):
+        # self.channel.basic_qos(prefetch_count=1)
         self.channel.basic_consume(
-            queue=STOCK_SERVICE_REQUESTS_QUEUE,
-            on_message_callback=self.callback,
-            auto_ack=True,
+            queue=STOCK_SERVICE_REQUESTS_QUEUE, on_message_callback=self.callback
         )
-        app.logger.debug("Started listening to stock service requests...")
         self.channel.start_consuming()
+        app.logger.debug("Started listening to stock service requests...")
 
     def close_connection(self):
         self.connection.close()
@@ -179,16 +206,6 @@ def rollback_stock(order_id: str, removed_items: list[tuple[str, int]]):
             db.set(removed_item_id, msgpack.encode(removed_item_entry))
         except redis.exceptions.RedisError as e:
             # TODO: Handle DB exceptions more carefully.
-            # Publish FAIL message to the Order Checkout saga replies queue.
-            response_message = f"For order {order_id}, there was a "
-            +"database error when trying to rollback the updated value for"
-            +f"item {removed_item_id}. \n{e}"
-            rabbitmq_handler.publish_message(
-                ORDER_CHECKOUT_SAGA_REPLIES_QUEUE,
-                response_message,
-                400,
-                order_id,
-            )
             raise e
     app.logger.debug("Stock rollback was successful.")
 
@@ -270,7 +287,7 @@ def remove_stock(item_id: str, amount: int):
 
 
 atexit.register(close_db_connection)
-atexit.register(rabbitmq_handler.close_connection)
+# atexit.register(rabbitmq_handler.close_connection)
 
 
 if __name__ == "__main__":
