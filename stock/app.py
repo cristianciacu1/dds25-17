@@ -67,6 +67,9 @@ class RabbitMQHandler:
             # Initialize Redlock for this item.
             lock = Redlock(key=lock_key, masters={db}, auto_release_time=10)
 
+            # In case this resource is locked, then no problem.
+            # We will reject this order on the reason that there was not enough stock.
+            # Maybe we could implement a retrying mechanism, but it is too complex.
             if lock.acquire():
                 try:
                     item_entry: StockValue = get_item_from_db(item_id)
@@ -234,6 +237,9 @@ def rollback_stock(
         # Create a unique lock key for this specific item.
         lock_key = f"stock_lock:{removed_item_id}"
 
+        # Unlike the previous case, the stock rollback needs to happen. Thus, retrying
+        # mechanism was implemented to make sure that the stock of this item is
+        # eventually rolled back.
         for attempt in range(max_attempts):
             # Initialize Redlock for this item.
             lock = Redlock(key=lock_key, masters={db}, auto_release_time=10)
