@@ -29,7 +29,9 @@ Basic project structure with Python's Flask and Redis.
 ### Deployment types:
 
 #### Locust with multiple workers
-Run the following command from the root directory of this project: `docker-compose -f locust-docker-compose.yml up --build --scale worker=8`
+Run the following command from the root directory of this project: `docker-compose -f locust-docker-compose.yml up --build --scale worker=8`.
+
+Once locust is running, you can access its dashboard at: `http://0.0.0.0:8089/?tab=charts`.
 
 #### docker-compose (local development)
 
