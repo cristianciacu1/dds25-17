@@ -28,6 +28,9 @@ Basic project structure with Python's Flask and Redis.
 
 ### Deployment types:
 
+#### Locust with multiple workers
+Run the following command from the root directory of this project: `docker-compose -f locust-docker-compose.yml up --build --scale worker=8`
+
 #### docker-compose (local development)
 
 After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
