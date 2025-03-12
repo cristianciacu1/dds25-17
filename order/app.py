@@ -320,7 +320,7 @@ def checkout(order_id: str):
         return Response(
             f"The process of checking out order {order_id} has already started. This "
             + "request is aborted.",
-            status=400,
+            status=200,
         )
 
     # Update the status of all three steps to PENDING, indicating that the checkout
