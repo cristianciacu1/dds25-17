@@ -287,7 +287,7 @@ def remove_stock(item_id: str, amount: int):
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(
-        f"Item: {item_id} stock updated to: {item_entry["stock"]}", status=200
+        f"Item: {item_id} stock updated to: {item_entry['stock']}", status=200
     )
 
 
