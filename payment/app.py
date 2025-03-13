@@ -7,9 +7,7 @@ import redis
 import threading
 import uuid
 
-from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
-from werkzeug.exceptions import HTTPException
 
 DB_ERROR_STR = "DB error"
 PAYMENT_SERVICE_REQUESTS_QUEUE = os.environ["PAYMENT_SERVICE_REQUESTS_QUEUE"]
@@ -33,9 +31,25 @@ def close_db_connection():
 
 atexit.register(close_db_connection)
 
+check_and_charge_user_script = """
+    local user_id = KEYS[1]
+    local total_cost = tonumber(ARGV[1])
 
-class UserValue(Struct):
-    credit: int
+    local available_funds = tonumber(redis.call('HGET', user_id, 'credit'))
+    if not available_funds then
+        return {false, "user_not_found", user_id}
+    end
+
+    if available_funds < total_cost then
+        return {false, "not_enough_funds", user_id}
+    end
+
+    redis.call('HINCRBY', user_id, 'credit', -total_cost)
+
+    return {true, "success"}
+"""
+
+check_and_charge_user = db.register_script(check_and_charge_user_script)
 
 
 class RabbitMQHandler:
@@ -56,33 +70,11 @@ class RabbitMQHandler:
         order_id = message["order_id"]
         order_type = message["type"]
 
-        try:
-            user_entry: UserValue = get_user_from_db(user_id)
-        except HTTPException:
-            self.publish_message(
-                method,
-                properties,
-                f"User {user_id} does not exist. Process stops here.",
-                400,
-                order_id,
-            )
-            return
-        user_entry.credit -= int(amount)
-        if user_entry.credit < 0:
-            # If the user does not have enough funds, then publish FAIL event to the
-            # order checkout saga.
-            self.publish_message(
-                method,
-                properties,
-                f"For order {order_id}, the user {user_id} did not have enough funds.",
-                400,
-                order_id,
-            )
-            return
-        try:
-            # Try to persist the change in user's funds.
-            db.set(user_id, msgpack.encode(user_entry))
+        result = check_and_charge_user([user_id], [amount])
 
+        status_of_result = result[0]
+
+        if status_of_result:
             # If successful and a saga action was performed then publish SUCCESS
             # event to the order checkout saga replies queue.
             if order_type == "action":
@@ -103,14 +95,29 @@ class RabbitMQHandler:
                     f"For order {order_id}, the user {user_id} was refunded "
                     + "successfully."
                 )
-        except redis.exceptions.RedisError:
-            # If the change in user's funds could not be persisted, then publish FAIL
-            # event to the order checkout saga.
+        else:
+            # Handle different error cases.
+            error_type = result[1]
+
+            match error_type:
+                case "user_not_found":
+                    response_message = (
+                        f"For order {order_id}, the user {user_id} does not exist."
+                    )
+                case "not_enough_funds":
+                    response_message = (
+                        f"For order {order_id}, the user {user_id} does not have "
+                        + "enough funds."
+                    )
+                case _:
+                    response_message = (
+                        f"When charging user {user_id} for order {order_id}, an "
+                        + f"unknown error occurred: {error_type}"
+                    )
             self.publish_message(
                 method,
                 properties,
-                f"For order {order_id}, the user {user_id} has enough funds, but the "
-                + "change in their funds could not be persisted in the database.",
+                response_message,
                 400,
                 order_id,
             )
@@ -160,15 +167,29 @@ class RabbitMQHandler:
         self.connection.close()
 
 
-def get_user_from_db(user_id: str) -> UserValue | None:
-    try:
-        # get serialized data
-        entry: bytes = db.get(user_id)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: UserValue | None = msgpack.decode(entry, type=UserValue) if entry else None
-    if entry is None:
+def decode_redis(src):
+    """Decode response from Redis. Note that this implementation is suitable only
+    for values (value from the key-value pair) that are supposed to be integers.
+    """
+    if isinstance(src, list):
+        rv = list()
+        for key in src:
+            rv.append(decode_redis(key))
+        return rv
+    elif isinstance(src, dict):
+        rv = dict()
+        for key in src:
+            rv[key.decode()] = decode_redis(src[key])
+        return rv
+    elif isinstance(src, bytes):
+        return int(src.decode())
+    else:
+        raise Exception("type not handled: " + type(src))
+
+
+def get_user_from_db(user_id: str) -> dict | None:
+    entry = decode_redis(db.hgetall(user_id))
+    if not entry:
         # if user does not exist in the database; abort
         abort(400, f"User: {user_id} not found!")
     return entry
@@ -191,11 +212,7 @@ consumer_thread.start()
 @app.post("/create_user")
 def create_user():
     key = str(uuid.uuid4())
-    value = msgpack.encode(UserValue(credit=0))
-    try:
-        db.set(key, value)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    db.hset(key, "credit", 0)
     return jsonify({"user_id": key})
 
 
@@ -203,55 +220,50 @@ def create_user():
 def batch_init_users(n: int, starting_money: int):
     n = int(n)
     starting_money = int(starting_money)
-    kv_pairs: dict[str, bytes] = {
-        f"{i}": msgpack.encode(UserValue(credit=starting_money)) for i in range(n)
-    }
-    try:
-        db.mset(kv_pairs)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    # TODO: Very slow. Consider creating a Lua script for adding users in batches.
+    for i in range(n):
+        db.hset(str(i), "credit", starting_money)
     return jsonify({"msg": "Batch init for users successful"})
 
 
 @app.get("/find_user/<user_id>")
 def find_user(user_id: str):
-    user_entry: UserValue = get_user_from_db(user_id)
-    return jsonify({"user_id": user_id, "credit": user_entry.credit})
+    user_entry: dict = get_user_from_db(user_id)
+    return jsonify(user_entry)
 
 
 @app.post("/add_funds/<user_id>/<amount>")
 def add_credit(user_id: str, amount: int):
-    user_entry: UserValue = get_user_from_db(user_id)
+    user_entry: dict = get_user_from_db(user_id)
     # update credit, serialize and update database
-    user_entry.credit += int(amount)
+    new_credit = user_entry["credit"] + int(amount)
     try:
-        db.set(user_id, msgpack.encode(user_entry))
+        db.hset(user_id, "credit", new_credit)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(
-        f"User: {user_id} credit updated to: {user_entry.credit}", status=200
+        f"User: {user_id} credit updated to: {user_entry['credit']}", status=200
     )
 
 
 @app.post("/pay/<user_id>/<amount>")
 def remove_credit(user_id: str, amount: int):
     app.logger.debug(f"Removing {amount} credit from user: {user_id}")
-    user_entry: UserValue = get_user_from_db(user_id)
+    user_entry: dict = get_user_from_db(user_id)
     # update credit, serialize and update database
-    user_entry.credit -= int(amount)
-    if user_entry.credit < 0:
+    new_credit = user_entry["credit"] - int(amount)
+    if user_entry["credit"] < 0:
         abort(400, f"User: {user_id} credit cannot get reduced below zero!")
     try:
-        db.set(user_id, msgpack.encode(user_entry))
+        db.hset(user_id, "credit", new_credit)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(
-        f"User: {user_id} credit updated to: {user_entry.credit}", status=200
+        f"User: {user_id} credit updated to: {user_entry['credit']}", status=200
     )
 
 
 atexit.register(close_db_connection)
-# atexit.register(rabbitmq_handler.close_connection)
 
 
 if __name__ == "__main__":
