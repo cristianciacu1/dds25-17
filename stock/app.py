@@ -8,13 +8,8 @@ import threading
 import redis
 import json
 
-from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
 import redis.exceptions
-
-from pottery import Redlock
-import time
-
 
 DB_ERROR_STR = "DB error"
 STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
@@ -35,9 +30,43 @@ def close_db_connection():
     db.close()
 
 
-class StockValue(Struct):
-    stock: int
-    price: int
+check_and_update_stock_script = """
+    -- Phase 1: Check if there's enough stock for all items
+    for i=1, #KEYS do
+        local item_id = tostring(KEYS[i])
+        local quantity = tonumber(ARGV[i])
+
+        -- Get current stock for the item
+        local current_stock = tonumber(redis.call('HGET', item_id, 'stock'))
+        if not current_stock then
+            return {false, "item_not_found", item_id}
+        end
+
+        -- Check if there's enough stock
+        if current_stock < quantity then
+            return {false, "not_enough_stock", item_id, current_stock, quantity}
+        end
+    end
+
+    -- Phase 2: If all checks passed, update stock for all items
+    for i=1, #KEYS do
+        local item_id = tostring(KEYS[i])
+        local quantity = tonumber(ARGV[i])
+
+        -- Update stock atomically
+        redis.call('HINCRBY', item_id, 'stock', -quantity)
+
+        -- Log the stock update
+        -- local new_stock = redis.call('HGET', item_id, 'stock')
+        -- redis.call('RPUSH', 'stock_logs',
+        --     string.format('Order %s: stock of item %s updated to %s',
+        --     order_id, item_id, new_stock))
+    end
+
+    return {true, "success"}
+"""
+
+check_and_update_stock = db.register_script(check_and_update_stock_script)
 
 
 class RabbitMQHandler:
@@ -57,116 +86,64 @@ class RabbitMQHandler:
         order_items_quantities = message["items"]
         order_type = message["type"]
 
-        # The removed items will contain the items that we already have successfully
-        # subtracted stock from for rollback purposes.
-        removed_items: list[tuple[str, int]] = []
-        for item_id, quantity in order_items_quantities.items():
-            # Create a unique lock key for this specific item.
-            lock_key = f"stock_lock:{item_id}"
+        keys = list(order_items_quantities.keys())
+        args = list(order_items_quantities.values()) + [order_id]
 
-            # Initialize Redlock for this item.
-            lock = Redlock(key=lock_key, masters={db}, auto_release_time=10)
+        result = check_and_update_stock(keys, args)
 
-            # In case this resource is locked, then no problem.
-            # We will reject this order on the reason that there was not enough stock.
-            # Maybe we could implement a retrying mechanism, but it is too complex.
-            if lock.acquire():
-                try:
-                    item_entry: StockValue = get_item_from_db(item_id)
-                    # update stock, serialize and update database.
-                    item_entry.stock -= int(quantity)
-                    if item_entry.stock < 0:
-                        try:
-                            # Rollback the stock to the already processed items.
-                            rollback_stock(order_id, removed_items, method, properties)
+        status_of_result = result[0]
 
-                            # If the rollback was successful, then publish event to
-                            # the order checkout saga informing it that there was
-                            # not enough stock for at least one item from the
-                            # current order.
-                            response_message = (
-                                f"For order {order_id}, there was not "
-                                + f"enough stock for item {item_id}."
-                            )
-                            self.publish_message(
-                                method,
-                                properties,
-                                response_message,
-                                400,
-                                order_id,
-                            )
-                            return
-                        except redis.exceptions.RedisError as e:
-                            # If the rollback was not successful, then return early.
-                            response_message = f"For order {order_id}, there was a "
-                            +"database error when trying to rollback the updated "
-                            +f"value for an item. \n{e}"
-                            self.publish_message(
-                                method,
-                                properties,
-                                response_message,
-                                400,
-                                order_id,
-                            )
-                            return
-                    try:
-                        # If we have enough stock for the current `item_id`, then
-                        # persist the stock subtraction.
-                        removed_items.append((item_id, quantity))
-                        db.set(item_id, msgpack.encode(item_entry))
-                        app.logger.debug(
-                            f"For order {order_id}, stock of item {item_id} was "
-                            + f"updated to: {item_entry.stock}."
-                        )
-                    except redis.exceptions.RedisError as e:
-                        # In case there was a database failure, Publish FAIL message
-                        # to the Order Checkout saga replies queue.
-                        response_message = (
-                            f"For order {order_id}, there was a database error when "
-                            + f"trying to save the updated value for item {item_id}."
-                            + f"\n{e}"
-                        )
-                        self.publish_message(
-                            method,
-                            properties,
-                            response_message,
-                            400,
-                            order_id,
-                        )
-                        return
-                finally:
-                    # Release lock.
-                    lock.release()
-            else:
-                # If all attempts fail, publish a failure message
-                response_message = f"Could not acquire lock for item {item_id}. Too "
-                +"many concurrent requests."
+        if status_of_result:
+            # In case there was enough stock for the entire order, then publish SUCCESS
+            # message to the Order Checkout saga replies queue.
+            if order_type == "action":
+                response_message = (
+                    f"For order {order_id}, stock was successfully updated."
+                )
                 self.publish_message(
                     method,
                     properties,
                     response_message,
-                    500,
+                    200,
                     order_id,
                 )
-                return
+            else:
+                # If a rollback was performed, then log the outcome.
+                # No need to publish message, since the Order Service does not expect
+                # a response from the compensation function.
+                app.logger.debug(
+                    f"For order {order_id}, the stock was rolled back successfully."
+                )
+        else:
+            # Handle different error cases.
+            error_type = result[1]
+            match error_type:
+                case "item_not_found":
+                    error_item = result[2]
+                    response_message = f"For order {order_id}, item {error_item} was "
+                    +"not found in the database."
+                case "not_enough_stock":
+                    error_item = result[2]
+                    current_stock = result[3]
+                    requested_quantity = result[4]
+                    response_message = (
+                        f"For order {order_id}, there was not enough stock for item "
+                        + f"{error_item}. Available: {current_stock}, Requested: "
+                        + f"{requested_quantity}."
+                    )
+                case _:
+                    response_message = (
+                        f"For order {order_id}, an unknown error occurred: {error_type}"
+                    )
 
-        # In case there was enough stock for the entire order, then publish SUCCESS
-        # message to the Order Checkout saga replies queue.
-        if order_type == "action":
-            response_message = f"For order {order_id}, stock was successfully updated."
+            # Publish message.
             self.publish_message(
                 method,
                 properties,
                 response_message,
-                200,
+                400,
                 order_id,
             )
-        else:
-            # If a rollback was performed, then log the outcome.
-            app.logger.debug(
-                f"For order {order_id}, the stock was rolled back successfully."
-            )
-        return
 
     def publish_message(
         self,
@@ -212,75 +189,32 @@ class RabbitMQHandler:
         self.connection.close()
 
 
-def get_item_from_db(item_id: str) -> StockValue | None:
-    # get serialized data
-    try:
-        entry: bytes = db.get(item_id)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: StockValue | None = msgpack.decode(entry, type=StockValue) if entry else None
-    if entry is None:
-        # if item does not exist in the database; abort
-        abort(400, f"Item: {item_id} not found!")
+def decode_redis(src):
+    """Decode response from Redis. Note that this implementation is suitable only
+    for values (value from the key-value pair) that are supposed to be integers.
+    """
+    if isinstance(src, list):
+        rv = list()
+        for key in src:
+            rv.append(decode_redis(key))
+        return rv
+    elif isinstance(src, dict):
+        rv = dict()
+        for key in src:
+            rv[key.decode()] = decode_redis(src[key])
+        return rv
+    elif isinstance(src, bytes):
+        return int(src.decode())
+    else:
+        raise Exception("type not handled: " + type(src))
+
+
+def get_item_from_db(item_id: str) -> dict | None:
+    entry = decode_redis(db.hgetall(item_id))
+    app.logger.debug(entry)
+    if not entry:
+        abort(400, f"Item {item_id} not found.")
     return entry
-
-
-def rollback_stock(
-    order_id: str, removed_items: list[tuple[str, int]], method, properties
-):
-    """Utility function to rollback all transactions from `removed_items`."""
-    # Implement lock acquisition with retries
-    max_attempts = 5  # Maximum number of lock attempts
-    retry_delay = 0.1  # Delay between retry attempts in seconds
-    for removed_item_id, removed_quantity in removed_items:
-        # Create a unique lock key for this specific item.
-        lock_key = f"stock_lock:{removed_item_id}"
-
-        # Unlike the previous case, the stock rollback needs to happen. Thus, retrying
-        # mechanism was implemented to make sure that the stock of this item is
-        # eventually rolled back.
-        for attempt in range(max_attempts):
-            # Initialize Redlock for this item.
-            lock = Redlock(key=lock_key, masters={db}, auto_release_time=10)
-
-            if lock.acquire():
-                try:
-                    # Possible optimization: keep the StockValue object in the
-                    # `removed_items` list.
-                    removed_item_entry: StockValue = get_item_from_db(removed_item_id)
-                    removed_item_entry.stock += int(removed_quantity)
-                    try:
-                        db.set(removed_item_id, msgpack.encode(removed_item_entry))
-                        app.logger.debug(
-                            f"For order {order_id}, stock rollback was successful."
-                        )
-                    except redis.exceptions.RedisError as e:
-                        # TODO: Handle DB exceptions more carefully.
-                        raise e
-                finally:
-                    # Release lock.
-                    lock.release()
-                    return
-            else:
-                # If lock acquisition fails, wait and retry
-                if attempt < max_attempts - 1:
-                    app.logger.debug(
-                        f"Lock acquisition failed for order {order_id}. Retrying..."
-                    )
-                    time.sleep(retry_delay)
-                else:
-                    # If all attempts fail, publish a failure message
-                    response_message = "Could not acquire lock for order "
-                    +f"{order_id}. Too many concurrent requests."
-                    rabbitmq_handler.publish_message(
-                        method,
-                        properties,
-                        response_message,
-                        500,
-                        order_id,
-                    )
-                    return
 
 
 # Create a single instance of RabbitMQHandler
@@ -301,9 +235,8 @@ consumer_thread.start()
 def create_item(price: int):
     key = str(uuid.uuid4())
     app.logger.debug(f"Item: {key} created")
-    value = msgpack.encode(StockValue(stock=0, price=int(price)))
     try:
-        db.set(key, value)
+        db.hset(key, mapping={"stock": 0, "price": int(price)})
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"item_id": key})
@@ -314,49 +247,48 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
     n = int(n)
     starting_stock = int(starting_stock)
     item_price = int(item_price)
-    kv_pairs: dict[str, bytes] = {
-        f"{i}": msgpack.encode(StockValue(stock=starting_stock, price=item_price))
-        for i in range(n)
-    }
-    try:
-        db.mset(kv_pairs)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    # TODO: Very slow. Consider creating a Lua script for adding items in batches.
+    for i in range(n):
+        db.hset(str(i), mapping={"stock": starting_stock, "price": item_price})
     return jsonify({"msg": "Batch init for stock successful"})
 
 
 @app.get("/find/<item_id>")
 def find_item(item_id: str):
     app.logger.debug(f"Item {item_id} is searched.")
-    item_entry: StockValue = get_item_from_db(item_id)
-    return jsonify({"stock": item_entry.stock, "price": item_entry.price})
+    item_entry = get_item_from_db(item_id)
+    return jsonify(item_entry)
 
 
 @app.post("/add/<item_id>/<amount>")
 def add_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
+    item_entry = get_item_from_db(item_id)
     # update stock, serialize and update database
-    item_entry.stock += int(amount)
+    new_stock = int(item_entry["stock"]) + int(amount)
     try:
-        db.set(item_id, msgpack.encode(item_entry))
+        db.hset(item_id, mapping={"stock": new_stock, "price": item_entry["price"]})
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    return Response(
+        f"Item: {item_id} stock updated to: {item_entry['stock']}", status=200
+    )
 
 
 @app.post("/subtract/<item_id>/<amount>")
 def remove_stock(item_id: str, amount: int):
-    item_entry: StockValue = get_item_from_db(item_id)
+    item_entry = get_item_from_db(item_id)
     # update stock, serialize and update database
-    item_entry.stock -= int(amount)
-    app.logger.debug(f"Item: {item_id} stock updated to: {item_entry.stock}")
-    if item_entry.stock < 0:
+    new_value = item_entry["stock"] - int(amount)
+    app.logger.debug(f"Item: {item_id} stock updated to: {new_value}")
+    if new_value < 0:
         abort(400, f"Item: {item_id} stock cannot get reduced below zero!")
     try:
-        db.set(item_id, msgpack.encode(item_entry))
+        db.hset(item_id, mapping={"stock": new_value, "price": item_entry["price"]})
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    return Response(f"Item: {item_id} stock updated to: {item_entry.stock}", status=200)
+    return Response(
+        f"Item: {item_id} stock updated to: {item_entry['stock']}", status=200
+    )
 
 
 atexit.register(close_db_connection)
