@@ -241,9 +241,7 @@ def add_credit(user_id: str, amount: int):
         db.hset(user_id, "credit", new_credit)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    return Response(
-        f"User: {user_id} credit updated to: {new_credit}", status=200
-    )
+    return Response(f"User: {user_id} credit updated to: {new_credit}", status=200)
 
 
 @app.post("/pay/<user_id>/<amount>")

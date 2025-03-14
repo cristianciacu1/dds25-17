@@ -37,6 +37,9 @@ check_and_update_stock_script = """
         local quantity = tonumber(ARGV[i])
 
         -- Get current stock for the item
+        -- Use `redis.pcall`, rather than `redis.call` since this one returns
+        -- `redis.error_reply` indicating that there was a runtime error, rather than,
+        -- for example, a key error.
         local current_stock = tonumber(redis.pcall('HGET', item_id, 'stock'))
         if not current_stock then
             return {false, "item_not_found", item_id}
@@ -93,7 +96,10 @@ class RabbitMQHandler:
         try:
             result = check_and_update_stock(keys, args)
         except redis.exceptions.ConnectionError as e:
-            response_message = f"For order {order_id}, there were issues with the connection to the database."
+            response_message = (
+                f"For order {order_id}, there were issues with the connection to the "
+                + f"database:\n{e}"
+            )
             self.publish_message(
                 method,
                 properties,
@@ -136,7 +142,10 @@ class RabbitMQHandler:
                     +"not found in the database."
                 case "database_error_during_check" | "database_error_during_update":
                     error = result[3]
-                    response_message = f"Order {order_id} could not be processed since there was an error with the database.\n{error}"
+                    response_message = (
+                        f"Order {order_id} could not be processed since there was an "
+                        + f"error with the database.\n{error}"
+                    )
                 case "not_enough_stock":
                     current_stock = result[3]
                     requested_quantity = result[4]
