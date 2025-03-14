@@ -45,7 +45,7 @@ static_resources:
   - name: order_service
     connect_timeout: 0.25s
     type: STRICT_DNS
-    lb_policy: ROUND_ROBIN
+    lb_policy: RANDOM
     load_assignment:
       cluster_name: order_service
       endpoints:
@@ -58,7 +58,7 @@ static_resources:
   - name: payment_service
     connect_timeout: 0.25s
     type: STRICT_DNS
-    lb_policy: ROUND_ROBIN
+    lb_policy: RANDOM
     load_assignment:
       cluster_name: payment_service
       endpoints:
@@ -71,7 +71,7 @@ static_resources:
   - name: stock_service
     connect_timeout: 0.25s
     type: STRICT_DNS
-    lb_policy: ROUND_ROBIN
+    lb_policy: RANDOM
     load_assignment:
       cluster_name: stock_service
       endpoints:
