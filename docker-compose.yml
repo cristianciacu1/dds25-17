@@ -33,7 +33,7 @@ services:
       replicas: 4
     environment:
       - GATEWAY_URL=http://gateway:80
-    command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=debug app:app
+    command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
       - env/api.env
@@ -53,7 +53,7 @@ services:
     deploy:
       mode: replicated
       replicas: 2
-    command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=debug app:app
+    command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
       - env/api.env
@@ -73,7 +73,7 @@ services:
     deploy:
       mode: replicated
       replicas: 2
-    command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=debug app:app
+    command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
       - env/api.env
