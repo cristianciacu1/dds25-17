@@ -37,9 +37,13 @@ check_and_update_stock_script = """
         local quantity = tonumber(ARGV[i])
 
         -- Get current stock for the item
-        local current_stock = tonumber(redis.call('HGET', item_id, 'stock'))
+        local current_stock = tonumber(redis.pcall('HGET', item_id, 'stock'))
         if not current_stock then
             return {false, "item_not_found", item_id}
+        elseif type(current_stock) == "table" and current_stock.err then
+            return {false, "database_error_during_check", item_id, current_stock.err}
+        else
+            current_stock = tonumber(current_stock)
         end
 
         -- Check if there's enough stock
@@ -54,13 +58,10 @@ check_and_update_stock_script = """
         local quantity = tonumber(ARGV[i])
 
         -- Update stock atomically
-        redis.call('HINCRBY', item_id, 'stock', -quantity)
-
-        -- Log the stock update
-        -- local new_stock = redis.call('HGET', item_id, 'stock')
-        -- redis.call('RPUSH', 'stock_logs',
-        --     string.format('Order %s: stock of item %s updated to %s',
-        --     order_id, item_id, new_stock))
+        local reply = redis.pcall('HINCRBY', item_id, 'stock', -quantity)
+        if type(reply) == "table" and reply.err then
+            return {false, "database_error_during_update", item_id, reply.err}
+        end
     end
 
     return {true, "success"}
@@ -89,7 +90,18 @@ class RabbitMQHandler:
         keys = list(order_items_quantities.keys())
         args = list(order_items_quantities.values()) + [order_id]
 
-        result = check_and_update_stock(keys, args)
+        try:
+            result = check_and_update_stock(keys, args)
+        except redis.exceptions.ConnectionError as e:
+            response_message = f"For order {order_id}, there were issues with the connection to the database."
+            self.publish_message(
+                method,
+                properties,
+                response_message,
+                400,
+                order_id,
+            )
+            return
 
         status_of_result = result[0]
 
@@ -117,13 +129,15 @@ class RabbitMQHandler:
         else:
             # Handle different error cases.
             error_type = result[1]
+            error_item = result[2]
             match error_type:
                 case "item_not_found":
-                    error_item = result[2]
                     response_message = f"For order {order_id}, item {error_item} was "
                     +"not found in the database."
+                case "database_error_during_check" | "database_error_during_update":
+                    error = result[3]
+                    response_message = f"Order {order_id} could not be processed since there was an error with the database.\n{error}"
                 case "not_enough_stock":
-                    error_item = result[2]
                     current_stock = result[3]
                     requested_quantity = result[4]
                     response_message = (
