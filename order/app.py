@@ -394,10 +394,12 @@ def checkout(order_id: str):
         db.set(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
-    
+
     end_time = time.time()
     execution_time = end_time - start_time
-    app.logger.debug(f"Checkout for order {order_id} took {execution_time:.6f} seconds.")
+    app.logger.debug(
+        f"Checkout for order {order_id} took {execution_time:.6f} seconds."
+    )
 
     if order_entry.order_status == Status.ACCEPTED.value:
         return Response(
