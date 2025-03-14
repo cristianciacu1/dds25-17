@@ -314,16 +314,17 @@ def checkout(order_id: str):
 
     # If this order was already checked out (either in progress or completed), we
     # should avoid checking it out again.
-    if order_entry.order_status != Status.IDLE.value:
-        app.logger.debug(
-            f"The process of checking out order {order_id} has already started. This "
-            + "request is aborted."
-        )
-        return Response(
-            f"The process of checking out order {order_id} has already started. This "
-            + "request is aborted.",
-            status=200,
-        )
+    # For debug purposes only, comment the following if statement to truly test the performance of the system.
+    # if order_entry.order_status != Status.IDLE.value:
+    #     app.logger.debug(
+    #         f"The process of checking out order {order_id} has already started. This "
+    #         + "request is aborted."
+    #     )
+    #     return Response(
+    #         f"The process of checking out order {order_id} has already started. This "
+    #         + "request is aborted.",
+    #         status=200,
+    #     )
 
     # Update the status of all three steps to PENDING, indicating that the checkout
     # procedure was initiated.
