@@ -314,7 +314,8 @@ def checkout(order_id: str):
 
     # If this order was already checked out (either in progress or completed), we
     # should avoid checking it out again.
-    # For debug purposes only, comment the following if statement to truly test the performance of the system.
+    # For debug purposes only, comment the following if statement to truly test the
+    # performance of the system.
     # if order_entry.order_status != Status.IDLE.value:
     #     app.logger.debug(
     #         f"The process of checking out order {order_id} has already started. This "
