@@ -28,6 +28,11 @@ Basic project structure with Python's Flask and Redis.
 
 ### Deployment types:
 
+#### Locust with multiple workers
+Runs together with the docker-compose responsible for the system, so no need to need to do something extra.
+
+Once locust is running, you can access its dashboard at: `http://0.0.0.0:8089/?tab=charts`.
+
 #### docker-compose (local development)
 
 After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
