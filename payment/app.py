@@ -35,16 +35,23 @@ check_and_charge_user_script = """
     local user_id = KEYS[1]
     local total_cost = tonumber(ARGV[1])
 
-    local available_funds = tonumber(redis.call('HGET', user_id, 'credit'))
+    local available_funds = redis.pcall('HGET', user_id, 'credit')
     if not available_funds then
         return {false, "user_not_found", user_id}
+    elseif type(available_funds) == "table" and available_funds.err then
+        return {false, "database_error_during_check", user_id, available_funds.err}
+    else
+        available_funds = tonumber(available_funds)
     end
 
     if available_funds < total_cost then
         return {false, "not_enough_funds", user_id}
     end
 
-    redis.call('HINCRBY', user_id, 'credit', -total_cost)
+    local reply = redis.pcall('HINCRBY', user_id, 'credit', -total_cost)
+    if type(reply) == "table" and reply.err then
+        return {false, "database_error_during_update", user_id, reply.err}
+    end
 
     return {true, "success"}
 """
@@ -70,7 +77,21 @@ class RabbitMQHandler:
         order_id = message["order_id"]
         order_type = message["type"]
 
-        result = check_and_charge_user([user_id], [amount])
+        try:
+            result = check_and_charge_user([user_id], [amount])
+        except redis.exceptions.ConnectionError as e:
+            response_message = (
+                f"When trying to charge/refund user {user_id}, there were issues "
+                + f"with the connection to the database.\n{e}"
+            )
+            self.publish_message(
+                method,
+                properties,
+                response_message,
+                400,
+                order_id,
+            )
+            return
 
         status_of_result = result[0]
 
@@ -97,7 +118,7 @@ class RabbitMQHandler:
                 )
         else:
             # Handle different error cases.
-            error_type = result[1]
+            error_type = result[1].decode("utf-8")
 
             match error_type:
                 case "user_not_found":
@@ -108,6 +129,12 @@ class RabbitMQHandler:
                     response_message = (
                         f"For order {order_id}, the user {user_id} does not have "
                         + "enough funds."
+                    )
+                case "database_error_during_check" | "database_error_during_update":
+                    error = result[3].decode("utf-8")
+                    response_message = (
+                        f"User {user_id} could not be charged since there was an "
+                        + f"error with the database.\n{error}"
                     )
                 case _:
                     response_message = (
