@@ -40,7 +40,7 @@ check_and_update_stock_script = """
         -- Use `redis.pcall`, rather than `redis.call` since this one returns
         -- `redis.error_reply` indicating that there was a runtime error, rather than,
         -- for example, a key error.
-        local current_stock = tonumber(redis.pcall('HGET', item_id, 'stock'))
+        local current_stock = redis.pcall('HGET', item_id, 'stock')
         if not current_stock then
             return {false, "item_not_found", item_id}
         elseif type(current_stock) == "table" and current_stock.err then
@@ -51,7 +51,8 @@ check_and_update_stock_script = """
 
         -- Check if there's enough stock
         if current_stock < quantity then
-            return {false, "not_enough_stock", item_id, current_stock, quantity}
+            return {false, "not_enough_stock", item_id,
+                tostring(current_stock), tostring(quantity)}
         end
     end
 
@@ -134,8 +135,10 @@ class RabbitMQHandler:
                 )
         else:
             # Handle different error cases.
-            error_type = result[1]
-            error_item = result[2]
+            # Decode the received message since Lua returns bytes rather
+            # than the string.
+            error_type = result[1].decode("utf-8")
+            error_item = result[2].decode("utf-8")
             match error_type:
                 case "item_not_found":
                     response_message = f"For order {order_id}, item {error_item} was "
@@ -147,8 +150,8 @@ class RabbitMQHandler:
                         + f"error with the database.\n{error}"
                     )
                 case "not_enough_stock":
-                    current_stock = result[3]
-                    requested_quantity = result[4]
+                    current_stock = result[3].decode("utf-8")
+                    requested_quantity = result[4].decode("utf-8")
                     response_message = (
                         f"For order {order_id}, there was not enough stock for item "
                         + f"{error_item}. Available: {current_stock}, Requested: "
