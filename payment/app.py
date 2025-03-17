@@ -141,13 +141,16 @@ class RabbitMQHandler:
                         f"When charging user {user_id} for order {order_id}, an "
                         + f"unknown error occurred: {error_type}"
                     )
-            self.publish_message(
-                method,
-                properties,
-                response_message,
-                400,
-                order_id,
-            )
+
+            # Publish message.
+            if order_type == 'action':
+                self.publish_message(
+                    method,
+                    properties,
+                    response_message,
+                    400,
+                    order_id,
+                )
 
     def publish_message(
         self,

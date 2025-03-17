@@ -163,13 +163,14 @@ class RabbitMQHandler:
                     )
 
             # Publish message.
-            self.publish_message(
-                method,
-                properties,
-                response_message,
-                400,
-                order_id,
-            )
+            if order_type == 'action':
+                self.publish_message(
+                    method,
+                    properties,
+                    response_message,
+                    400,
+                    order_id,
+                )
 
     def publish_message(
         self,

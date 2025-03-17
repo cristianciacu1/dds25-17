@@ -33,6 +33,7 @@ services:
       replicas: 4
     environment:
       - GATEWAY_URL=http://gateway:80
+      - REDIS_URL=redis://sentinel:26379/0?sentinelMaster=order-db
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
@@ -45,7 +46,33 @@ services:
 
   order-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+    environment:
+      - REDIS_PASSWORD=redis
+    networks:
+      - redis_network
+
+  order-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --replicaof order-db 6379 --masterauth redis
+    environment:
+      - REDIS_PASSWORD=redis
+    networks:
+      - redis_network
+    depends_on:
+      - order-db
+
+  order-sentinel:
+    image: redis:7.2-bookworm
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./sentinel-order.conf:/etc/redis/sentinel.conf
+    networks:
+      - redis_network
+    depends_on:
+      - order-db
+      - order-db-replica
+
 
   stock-service:
     build: ./stock
@@ -53,6 +80,8 @@ services:
     deploy:
       mode: replicated
       replicas: 2
+    environment:
+      - REDIS_URL=redis://sentinel:26379/1?sentinelMaster=stock-db
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
@@ -65,7 +94,33 @@ services:
 
   stock-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+    environment:
+      - REDIS_PASSWORD=redis
+    networks:
+      - redis_network
+
+  stock-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --replicaof stock-db 6379 --masterauth redis
+    environment:
+      - REDIS_PASSWORD=redis
+    networks:
+      - redis_network
+    depends_on:
+      - stock-db
+
+  stock-sentinel:
+    image: redis:7.2-bookworm
+    command: >
+      redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./sentinel-stock.conf:/etc/redis/sentinel.conf
+    networks:
+      - redis_network
+    depends_on:
+      - stock-db
+      - stock-db-replica
 
   payment-service:
     build: ./payment
@@ -73,6 +128,8 @@ services:
     deploy:
       mode: replicated
       replicas: 2
+    environment:
+      - REDIS_URL=redis://sentinel:26379/2?sentinelMaster=payment-db
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
@@ -85,7 +142,33 @@ services:
 
   payment-db:
     image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
+    environment:
+      - REDIS_PASSWORD=redis
+    networks:
+      - redis_network
+
+  payment-db-replica:
+    image: redis:7.2-bookworm
+    command: redis-server --requirepass redis --replicaof payment-db 6379 --masterauth redis
+    environment:
+      - REDIS_PASSWORD=redis
+    networks:
+      - redis_network
+    depends_on:
+      - payment-db
+
+  payment-sentinel:
+    image: redis:7.2-bookworm
+    command: >
+      redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./sentinel-payment.conf:/etc/redis/sentinel.conf
+    networks:
+      - redis_network
+    depends_on:
+      - payment-db
+      - payment-db-replica
 
   master:
     image: locustio/locust
@@ -102,3 +185,7 @@ services:
     deploy:
       replicas: 4
     command: -f /mnt/locust/locustfile.py --worker --master-host master
+
+networks:
+  redis_network:
+    driver: bridge
