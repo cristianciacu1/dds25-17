@@ -4,6 +4,8 @@ services:
     ports:
       - '5672:5672'
       - '15672:15672'
+    networks:
+      - general_network
     environment:
       AMQP_URL: 'amqp://rabbitmq?connection_attempts=5&retry_delay=5'
       RABBITMQ_DEFAULT_USER: guest
@@ -24,6 +26,8 @@ services:
       - order-service
       - stock-service
       - payment-service
+    networks:
+      - general_network
 
   order-service:
     build: ./order
@@ -33,45 +37,100 @@ services:
       replicas: 4
     environment:
       - GATEWAY_URL=http://gateway:80
-      - REDIS_URL=redis://sentinel:26379/0?sentinelMaster=order-db
+    networks:
+      - redis_network
+      - general_network
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/order_redis.env
       - env/api.env
     depends_on:
-      order-db:
+      order-db-master:
         condition: service_started
       rabbitmq:
         condition: service_healthy
 
-  order-db:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
-    environment:
-      - REDIS_PASSWORD=redis
+  order-db-master:
+    image: redis:7.2
+    container_name: order-db-master
+    hostname: order-db-master
+    ports:
+      - 6379:6379
     networks:
       - redis_network
+    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis --replica-announce-ip order-db-master
 
-  order-db-replica:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --replicaof order-db 6379 --masterauth redis
-    environment:
-      - REDIS_PASSWORD=redis
+  order-db-replica-1:
+    image: redis:7.2
+    container_name: order-db-replica-1
+    hostname: order-db-replica-1
+    ports:
+      - 6381:6381
     networks:
       - redis_network
+    command: redis-server --requirepass redis --replicaof order-db-master 6379 --masterauth redis --replica-announce-ip order-db-replica-1
     depends_on:
-      - order-db
+      - order-db-master
 
-  order-sentinel:
-    image: redis:7.2-bookworm
+  order-db-replica-2:
+    image: redis:7.2
+    container_name: order-db-replica-2
+    hostname: order-db-replica-2
+    ports:
+      - 6382:6382
+    networks:
+      - redis_network
+    command: redis-server --requirepass redis --replicaof order-db-master 6379 --masterauth redis --replica-announce-ip order-db-replica-2
+    depends_on:
+      - order-db-master
+
+  order-sentinel-1:
+    image: redis:7.2
+    container_name: order-sentinel-1
+    hostname: order-sentinel-1
+    ports:
+      - 26479:26479
+    networks:
+      - redis_network
     command: redis-sentinel /etc/redis/sentinel.conf
     volumes:
-      - ./sentinel-order.conf:/etc/redis/sentinel.conf
+      - ./sentinel-order-1.conf:/etc/redis/sentinel.conf
+    depends_on:
+      - order-db-master
+      - order-db-replica-1
+      - order-db-replica-2
+
+  order-sentinel-2:
+    image: redis:7.2
+    container_name: order-sentinel-2
+    hostname: order-sentinel-2
+    ports:
+      - 26480:26479
     networks:
       - redis_network
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./sentinel-order-2.conf:/etc/redis/sentinel.conf
     depends_on:
-      - order-db
-      - order-db-replica
+      - order-db-master
+      - order-db-replica-1
+      - order-db-replica-2
+
+  order-sentinel-3:
+    image: redis:7.2
+    container_name: order-sentinel-3
+    hostname: order-sentinel-3
+    ports:
+      - 26481:26479
+    networks:
+      - redis_network
+    command: redis-sentinel /etc/redis/sentinel.conf
+    volumes:
+      - ./sentinel-order-3.conf:/etc/redis/sentinel.conf
+    depends_on:
+      - order-db-master
+      - order-db-replica-1
+      - order-db-replica-2
 
 
   stock-service:
@@ -80,8 +139,8 @@ services:
     deploy:
       mode: replicated
       replicas: 2
-    environment:
-      - REDIS_URL=redis://sentinel:26379/1?sentinelMaster=stock-db
+    networks:
+      - general_network
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/stock_redis.env
@@ -93,34 +152,10 @@ services:
         condition: service_healthy
 
   stock-db:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
-    environment:
-      - REDIS_PASSWORD=redis
+    image: redis:7.2
+    command: redis-server --requirepass redis --maxmemory 512mb
     networks:
-      - redis_network
-
-  stock-db-replica:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --replicaof stock-db 6379 --masterauth redis
-    environment:
-      - REDIS_PASSWORD=redis
-    networks:
-      - redis_network
-    depends_on:
-      - stock-db
-
-  stock-sentinel:
-    image: redis:7.2-bookworm
-    command: >
-      redis-sentinel /etc/redis/sentinel.conf
-    volumes:
-      - ./sentinel-stock.conf:/etc/redis/sentinel.conf
-    networks:
-      - redis_network
-    depends_on:
-      - stock-db
-      - stock-db-replica
+      - general_network
 
   payment-service:
     build: ./payment
@@ -128,8 +163,8 @@ services:
     deploy:
       mode: replicated
       replicas: 2
-    environment:
-      - REDIS_URL=redis://sentinel:26379/2?sentinelMaster=payment-db
+    networks:
+      - general_network
     command: gunicorn -b 0.0.0.0:5000 -w 1 --timeout 30 --log-level=info app:app
     env_file:
       - env/payment_redis.env
@@ -141,34 +176,10 @@ services:
         condition: service_healthy
 
   payment-db:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --maxmemory 512mb --masterauth redis
-    environment:
-      - REDIS_PASSWORD=redis
+    image: redis:7.2
+    command: redis-server --requirepass redis --maxmemory 512mb
     networks:
-      - redis_network
-
-  payment-db-replica:
-    image: redis:7.2-bookworm
-    command: redis-server --requirepass redis --replicaof payment-db 6379 --masterauth redis
-    environment:
-      - REDIS_PASSWORD=redis
-    networks:
-      - redis_network
-    depends_on:
-      - payment-db
-
-  payment-sentinel:
-    image: redis:7.2-bookworm
-    command: >
-      redis-sentinel /etc/redis/sentinel.conf
-    volumes:
-      - ./sentinel-payment.conf:/etc/redis/sentinel.conf
-    networks:
-      - redis_network
-    depends_on:
-      - payment-db
-      - payment-db-replica
+      - general_network
 
   master:
     image: locustio/locust
@@ -187,5 +198,10 @@ services:
     command: -f /mnt/locust/locustfile.py --worker --master-host master
 
 networks:
+  general_network:
+    driver: bridge
   redis_network:
     driver: bridge
+    ipam:
+      config:
+        - subnet: 172.21.0.0/24

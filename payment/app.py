@@ -143,7 +143,7 @@ class RabbitMQHandler:
                     )
 
             # Publish message.
-            if order_type == 'action':
+            if order_type == "action":
                 self.publish_message(
                     method,
                     properties,

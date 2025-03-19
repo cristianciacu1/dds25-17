@@ -8,9 +8,13 @@ from enum import Enum
 
 import json
 import pika
-import redis
+from redis import Redis, RedisError, sentinel
+from redis.typing import AnyKeyT, EncodableT
 import requests
 import time
+import sys
+
+from typing import Mapping
 
 from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
@@ -27,17 +31,55 @@ RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("order-service")
 
-db: redis.Redis = redis.Redis(
-    host=os.environ["REDIS_HOST"],
-    port=int(os.environ["REDIS_PORT"]),
-    password=os.environ["REDIS_PASSWORD"],
-    db=int(os.environ["REDIS_DB"]),
-)
+class RedisDriver:
+    def __init__(self):
+        self.service = "mymaster"
+        self.__connect()
+
+    def __connect(self):
+        try:
+            self.connection = sentinel.Sentinel([('order-sentinel-1', 26479), ('order-sentinel-2', 26479), ('order-sentinel-3', 26479)],
+                                                socket_timeout=0.1)
+            app.logger.debug("Connected to redis.")
+        except RedisError as err:
+            error_str = "1. Error while connecting to redis : " + str(err)
+            app.logger.debug(error_str)
+            sys.exit(error_str)
+
+    def set(self, key: str, value: bytes):
+        try:
+            master: Redis = self.connection.master_for(self.service, socket_timeout=0.1, password='redis')
+            master.set(key, value)
+            return {"status": True}
+        except RedisError as err:
+            error_str = "2. Error while connecting to redis : " + str(err)
+            app.logger.debug(error_str)
+            return {"status": False, "error": error_str}
 
 
-def close_db_connection():
-    db.close()
+    def get(self, key: str):
+        try:
+            master: Redis = self.connection.master_for(self.service, socket_timeout=0.1, password='redis')
+            value = master.get(key)
+        except RedisError as err:
+            error_str = "3. Error while retrieving value from redis : " + str(err)
+            return({"status": False, "error": error_str})
 
+        if value is not None:
+            return({"status": True, "value": value})
+        else:
+            return({"status": False, "error": f"Key {key} not found."})
+
+    def mset(self, mapping: Mapping[AnyKeyT, EncodableT]):
+        try:
+            master: Redis = self.connection.master_for(self.service, socket_timeout=0.1, password='redis')
+            master.mset(mapping)
+            return {"status": True}
+        except RedisError as err:
+            error_str = "4. Error while connecting to redis : " + str(err)
+            return {"status": False, "error": error_str}
+
+redis_driver = RedisDriver()
 
 class OrderValue(Struct):
     stock_status: int
@@ -97,17 +139,11 @@ class RabbitMQHandler:
 
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
-    try:
-        # get serialized data
-        entry: bytes = db.get(order_id)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    # deserialize data if it exists else return null
-    entry: OrderValue | None = msgpack.decode(entry, type=OrderValue) if entry else None
-    if entry is None:
-        # if order does not exist in the database; abort
-        abort(400, f"Order: {order_id} not found!")
-    return entry
+    result = redis_driver.get(order_id)
+    if not result["status"]:
+        abort(400, result["error"])
+    result = msgpack.decode(result["value"], type=OrderValue) if result["value"] else None
+    return result
 
 
 def send_post_request(url: str):
@@ -190,10 +226,12 @@ def create_order(user_id: str):
             total_cost=0,
         )
     )
-    try:
-        db.set(key, value)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    result = redis_driver.set(key, value)
+    if not result["status"]:
+        response_message = f"Order {key} could be created because: {result["error"]}"
+        app.logger.debug(response_message)
+        abort(400, response_message)
+    app.logger.debug(f"Order {key} by user {user_id} was successfully created.")
     return jsonify({"order_id": key})
 
 
@@ -223,11 +261,15 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
     kv_pairs: dict[str, bytes] = {
         f"{i}": msgpack.encode(generate_entry()) for i in range(n)
     }
-    try:
-        db.mset(kv_pairs)
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
-    return jsonify({"msg": "Batch init for orders successful"})
+    result = redis_driver.mset(kv_pairs)
+    if not result["status"]:
+        response_message = f"Batch initialization for orders was not successful because: {result["error"]}"
+        app.logger.debug(response_message)
+        abort(400, response_message)
+
+    response_message = "Batch init for orders successful"
+    app.logger.debug(response_message)
+    return jsonify({"msg": response_message})
 
 
 @app.get("/find/<order_id>")
@@ -258,10 +300,13 @@ def add_item(order_id: str, item_id: str, quantity: int):
     item_json: dict = item_reply.json()
     order_entry.items.append((item_id, int(quantity)))
     order_entry.total_cost += int(quantity) * item_json["price"]
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+
+    result = redis_driver.set(order_id, msgpack.encode(order_entry))
+    if not result["status"]:
+        response_message = f"For order {order_id}, there was an error adding item {item_id} for {quantity} times because: {result["error"]}"
+        app.logger.debug(response_message)
+        abort(400, response_message)
+    
     return Response(
         f"Item: {item_id} added to: {order_id} "
         f"price updated to: {order_entry.total_cost}",
@@ -298,10 +343,10 @@ def syncCheckout(order_id: str):
         rollback_stock(removed_items)
         abort(400, "User out of credit")
     order_entry.paid = True
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+
+    result = redis_driver.set(order_id, msgpack.encode(order_entry))
+    if not result["status"]:
+        abort(400, f"Order {order_id} could not be checked out because: {result["error"]}")
     app.logger.debug("Checkout successful")
     return Response("Checkout successful", status=200)
 
@@ -332,10 +377,10 @@ def checkout(order_id: str):
     order_entry.stock_status = Status.PENDING.value
     order_entry.order_status = Status.PENDING.value
     order_entry.payment_status = Status.PENDING.value
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+
+    result = redis_driver.set(order_id, msgpack.encode(order_entry))
+    if not result["status"]:
+        abort(400, f"Order {order_id} could not be updated because {result["error"]}")
 
     # get the quantity per item.
     items_quantities: dict[str, int] = defaultdict(int)
@@ -392,10 +437,9 @@ def checkout(order_id: str):
         if response_status_from_payment_service == 200:
             # Payment was successful, but stock update has failed. Refund the user.
             rollback_payment_async(order_id, order_entry)
-    try:
-        db.set(order_id, msgpack.encode(order_entry))
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+    result = redis_driver.set(order_id, msgpack.encode(order_entry))
+    if not result["status"]:
+        abort(400, f"Order {order_id} could not be updated because: {result["error"]}")
 
     end_time = time.time()
     execution_time = end_time - start_time
@@ -415,7 +459,7 @@ def checkout(order_id: str):
         )
 
 
-atexit.register(close_db_connection)
+# atexit.register(close_db_connection)
 # atexit.register(rabbitmq_handler.close_connection)
 
 if __name__ == "__main__":

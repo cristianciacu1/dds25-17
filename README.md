@@ -35,6 +35,8 @@ Once locust is running, you can access its dashboard at: `http://0.0.0.0:8089/?t
 
 #### docker-compose (local development)
 
+See the IPs of all docker containers: `docker inspect -f '{{.Name}} - {{range.NetworkSettings.Networks}}{{.IPAddress}}{{end}}' $(docker ps -aq)`
+
 After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
 (you can use the provided tests in the `\test` folder and change them as you wish). 
 
