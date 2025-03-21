@@ -100,5 +100,5 @@ services:
     volumes:
       - ./:/mnt/locust
     deploy:
-      replicas: 4
+      replicas: 8
     command: -f /mnt/locust/locustfile.py --worker --master-host master
