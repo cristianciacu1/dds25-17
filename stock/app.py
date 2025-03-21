@@ -71,7 +71,14 @@ check_and_update_stock_script = """
     return {true, "success"}
 """
 
+batch_update_stock_script = """
+    for i=1, #KEYS do
+        redis.pcall('HSET', tostring(i-1), 'stock', ARGV[0], 'price', ARGV[1])
+    end
+"""
+
 check_and_update_stock = db.register_script(check_and_update_stock_script)
+batch_update_stock = db.register_script(batch_update_stock_script)
 
 
 class RabbitMQHandler:
@@ -273,9 +280,7 @@ def batch_init_users(n: int, starting_stock: int, item_price: int):
     n = int(n)
     starting_stock = int(starting_stock)
     item_price = int(item_price)
-    # TODO: Very slow. Consider creating a Lua script for adding items in batches.
-    for i in range(n):
-        db.hset(str(i), mapping={"stock": starting_stock, "price": item_price})
+    batch_update_stock([i for i in range(n)], [starting_stock, item_price])
     return jsonify({"msg": "Batch init for stock successful"})
 
 
