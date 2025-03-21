@@ -19,9 +19,8 @@ We saw that running Locust with only one worker cannot measure properly the perf
 
 Once Locust and the system are running, you can access Locust's dashboard at: `http://0.0.0.0:8089/?tab=charts`.
 
-## docker-compose (local development)
+## Running the project
 
-After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
-(you can use the provided tests in the `\test` folder and change them as you wish). 
+Run `docker-compose up --build` in the base folder to open the system.
 
 ***Requirements:*** You need to have docker and docker-compose installed on your machine. 
