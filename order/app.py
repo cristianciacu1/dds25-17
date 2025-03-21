@@ -176,18 +176,21 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
 rabbitmq_handler = RabbitMQHandler()
 
 
-@retry(stop=stop_after_delay(5), wait=wait_fixed(1), retry=retry_if_exception_type(redis.exceptions.RedisError))
+@retry(stop=stop_after_delay(5), wait=wait_fixed(1),
+       retry=retry_if_exception_type(redis.exceptions.RedisError))
 def set_with_retry(key: str, value: bytes):
     db.set(key, value)
 
 
-@retry(stop=stop_after_delay(5), wait=wait_fixed(1), retry=retry_if_exception_type(redis.exceptions.RedisError))
+@retry(stop=stop_after_delay(5), wait=wait_fixed(1),
+       retry=retry_if_exception_type(redis.exceptions.RedisError))
 def get_with_retry(key: str):
     result = db.get(key)
     return result
 
 
-@retry(stop=stop_after_delay(5), wait=wait_fixed(1), retry=retry_if_exception_type(redis.exceptions.RedisError))
+@retry(stop=stop_after_delay(5), wait=wait_fixed(1),
+       retry=retry_if_exception_type(redis.exceptions.RedisError))
 def mset_with_retry(kv_pairs: dict[str, bytes]):
     db.mset(kv_pairs)
 
