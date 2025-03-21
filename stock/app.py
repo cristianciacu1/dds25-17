@@ -170,13 +170,14 @@ class RabbitMQHandler:
                     )
 
             # Publish message.
-            self.publish_message(
-                method,
-                properties,
-                response_message,
-                400,
-                order_id,
-            )
+            if order_type == "action":
+                self.publish_message(
+                    method,
+                    properties,
+                    response_message,
+                    400,
+                    order_id,
+                )
 
     def publish_message(
         self,
@@ -267,11 +268,11 @@ consumer_thread.start()
 @app.post("/item/create/<price>")
 def create_item(price: int):
     key = str(uuid.uuid4())
-    app.logger.debug(f"Item: {key} created")
     try:
         db.hset(key, mapping={"stock": 0, "price": int(price)})
-    except redis.exceptions.RedisError:
-        return abort(400, DB_ERROR_STR)
+        app.logger.debug(f"Item: {key} created.")
+    except redis.exceptions.RedisError as e:
+        return abort(400, e)
     return jsonify({"item_id": key})
 
 
