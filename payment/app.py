@@ -56,7 +56,14 @@ check_and_charge_user_script = """
     return {true, "success"}
 """
 
+batch_update_user_script = """
+    for i=1, #KEYS do
+        redis.pcall('HSET', tostring(i-1), 'credit', ARGV[0])
+    end
+"""
+
 check_and_charge_user = db.register_script(check_and_charge_user_script)
+batch_update_user = db.register_script(batch_update_user_script)
 
 
 class RabbitMQHandler:
@@ -247,9 +254,7 @@ def create_user():
 def batch_init_users(n: int, starting_money: int):
     n = int(n)
     starting_money = int(starting_money)
-    # TODO: Very slow. Consider creating a Lua script for adding users in batches.
-    for i in range(n):
-        db.hset(str(i), "credit", starting_money)
+    batch_update_user([i for i in range(n)], [starting_money])
     return jsonify({"msg": "Batch init for users successful"})
 
 
