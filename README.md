@@ -1,58 +1,26 @@
-# Web-scale Data Management Project Template
+# Details about our implementation
+The goal of this project is to design the architecture and define the transaction protocol for a generic E-Commerce system composed of three parts: Order, Payment, and Stock. We propose to leverage an **event-driven microservices architecture**, as our focus for this system is to achieve **high performance** while still guaranteeing **eventual consistency**. Each of the three microservices manages its own database system, and interservice communication is performed asynchronously. The figure below illustrates the proposed architecture.
 
-Basic project structure with Python's Flask and Redis. 
-**You are free to use any web framework in any language and any database you like for this project.**
+<img src="resources/dds_architecture.png" alt="Architecture for the system, group 17" width="600"/>
 
-### Project structure
+## Number of replicas
+We decided to replicate our services to distribute the load over multiple workers with the goal of achieving higher throughput. Specifically, we have 4 replicas of the Order Service and 2 replicas each for Stock and Payment Services.
 
-* `env`
-    Folder containing the Redis env variables for the docker-compose deployment
-    
-* `helm-config` 
-   Helm chart values for Redis and ingress-nginx
-        
-* `k8s`
-    Folder containing the kubernetes deployments, apps and services for the ingress, order, payment and stock services.
-    
-* `order`
-    Folder containing the order application logic and dockerfile. 
-    
-* `payment`
-    Folder containing the payment application logic and dockerfile. 
+The reason behind the different number of replicas per service is the actual load. We observed that setting each service to be replicated 4 times yielded a worse result than the current setup (i.e. lower RPS and higher response time for 10.000 users checking out simultaneously).
 
-* `stock`
-    Folder containing the stock application logic and dockerfile. 
+## Changing the load balancer
+While performing stress experiments, we saw that the response time increased at a slower than linear pace. Yet, after achieving an RPS of around 5.000, we saw a significant increase in the worst case response time (over 20.000ms). Additionally, we measured the latency of the checkout procedure and resulted in a surprising value - it ranges between 2 and 20ms, depending on the load, yet the actual response time was significantly higher. After some investigations, we came to the conclusion that the Nginx load balancer could not handle the high load. Did some research and [found out](https://www.loggly.com/blog/benchmarking-5-popular-load-balancers-nginx-haproxy-envoy-traefik-and-alb/) that the [Envoy Proxy](https://www.envoyproxy.io/) promises to provide better performance than Nginx. With the new load balancer in place, we achieve higher RPS, while keeping the response time relatively constant (after the number of users has stabilized).
 
-* `test`
-    Folder containing some basic correctness tests for the entire system. (Feel free to enhance them)
+## Performance of the system
+Regarding the performance, our system achieves high throughput with relatively low response time, while still achieving 100% consistency. Specifically, when runnning Locust with 8 workers, while the system runs the configuration described above, we achieve an average of ~6.200 RPS with a median response time of 18ms. More detailed statistics on the performance of our system can be found [here](resources/Locust_2025-03-21-18h54_locustfile.py_http___master_8089.html).
 
-### Deployment types:
+## Locust with multiple workers
+We saw that running Locust with only one worker cannot measure properly the performance of the system. Thus, we ran Locust with multiple workers by running an image of Locust with the docker-compose responsible for the system. 
 
-#### Locust with multiple workers
-Runs together with the docker-compose responsible for the system, so no need to need to do something extra.
+Once Locust and the system are running, you can access Locust's dashboard at: `http://0.0.0.0:8089/?tab=charts`.
 
-Once locust is running, you can access its dashboard at: `http://0.0.0.0:8089/?tab=charts`.
+## Running the project
 
-#### docker-compose (local development)
-
-After coding the REST endpoint logic run `docker-compose up --build` in the base folder to test if your logic is correct
-(you can use the provided tests in the `\test` folder and change them as you wish). 
+Run `docker-compose up --build` in the base folder to open the system.
 
 ***Requirements:*** You need to have docker and docker-compose installed on your machine. 
-
-K8s is also possible, but we do not require it as part of your submission. 
-
-#### minikube (local k8s cluster)
-
-This setup is for local k8s testing to see if your k8s config works before deploying to the cloud. 
-First deploy your database using helm by running the `deploy-charts-minicube.sh` file (in this example the DB is Redis 
-but you can find any database you want in https://artifacthub.io/ and adapt the script). Then adapt the k8s configuration files in the
-`\k8s` folder to mach your system and then run `kubectl apply -f .` in the k8s folder. 
-
-***Requirements:*** You need to have minikube (with ingress enabled) and helm installed on your machine.
-
-#### kubernetes cluster (managed k8s cluster in the cloud)
-
-Similarly to the `minikube` deployment but run the `deploy-charts-cluster.sh` in the helm step to also install an ingress to the cluster. 
-
-***Requirements:*** You need to have access to kubectl of a k8s cluster.
