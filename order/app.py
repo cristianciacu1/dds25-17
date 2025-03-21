@@ -12,8 +12,9 @@ import redis
 import requests
 import time
 
-from msgspec import msgpack, Struct
 from flask import Flask, jsonify, abort, Response
+from gevent.pywsgi import WSGIServer
+from msgspec import msgpack, Struct
 
 
 DB_ERROR_STR = "DB error"
@@ -419,7 +420,10 @@ atexit.register(close_db_connection)
 # atexit.register(rabbitmq_handler.close_connection)
 
 if __name__ == "__main__":
-    app.run(host="0.0.0.0", port=8000, debug=True)
+    http_server = WSGIServer(("0.0.0.0", 5000), app)
+    http_server.spawn = 4
+    http_server.serve_forever()
+    # app.run(host="0.0.0.0", port=8000, debug=True)
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
     app.logger.handlers = gunicorn_logger.handlers
