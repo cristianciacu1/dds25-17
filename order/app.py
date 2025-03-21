@@ -13,9 +13,9 @@ import requests
 import time
 
 from flask import Flask, jsonify, abort, Response
+from tenacity import retry, stop_after_delay, wait_fixed, retry_if_exception_type
 from gevent.pywsgi import WSGIServer
 from msgspec import msgpack, Struct
-
 
 DB_ERROR_STR = "DB error"
 REQ_ERROR_STR = "Requests error"
@@ -99,8 +99,7 @@ class RabbitMQHandler:
 
 def get_order_from_db(order_id: str) -> OrderValue | None:
     try:
-        # get serialized data
-        entry: bytes = db.get(order_id)
+        entry = get_with_retry(order_id)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     # deserialize data if it exists else return null
@@ -177,6 +176,22 @@ def rollback_payment_async(order_id: str, order_entry: OrderValue):
 rabbitmq_handler = RabbitMQHandler()
 
 
+@retry(stop=stop_after_delay(5), wait=wait_fixed(1), retry=retry_if_exception_type(redis.exceptions.RedisError))
+def set_with_retry(key: str, value: bytes):
+    db.set(key, value)
+
+
+@retry(stop=stop_after_delay(5), wait=wait_fixed(1), retry=retry_if_exception_type(redis.exceptions.RedisError))
+def get_with_retry(key: str):
+    result = db.get(key)
+    return result
+
+
+@retry(stop=stop_after_delay(5), wait=wait_fixed(1), retry=retry_if_exception_type(redis.exceptions.RedisError))
+def mset_with_retry(kv_pairs: dict[str, bytes]):
+    db.mset(kv_pairs)
+
+
 @app.post("/create/<user_id>")
 def create_order(user_id: str):
     key = str(uuid.uuid4())
@@ -192,7 +207,7 @@ def create_order(user_id: str):
         )
     )
     try:
-        db.set(key, value)
+        set_with_retry(key, value)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"order_id": key})
@@ -200,7 +215,6 @@ def create_order(user_id: str):
 
 @app.post("/batch_init/<n>/<n_items>/<n_users>/<item_price>")
 def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
-
     n = int(n)
     n_items = int(n_items)
     n_users = int(n_users)
@@ -225,7 +239,7 @@ def batch_init_users(n: int, n_items: int, n_users: int, item_price: int):
         f"{i}": msgpack.encode(generate_entry()) for i in range(n)
     }
     try:
-        db.mset(kv_pairs)
+        mset_with_retry(kv_pairs)
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return jsonify({"msg": "Batch init for orders successful"})
@@ -260,7 +274,7 @@ def add_item(order_id: str, item_id: str, quantity: int):
     order_entry.items.append((item_id, int(quantity)))
     order_entry.total_cost += int(quantity) * item_json["price"]
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        set_with_retry(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     return Response(
@@ -300,7 +314,7 @@ def syncCheckout(order_id: str):
         abort(400, "User out of credit")
     order_entry.paid = True
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        set_with_retry(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
     app.logger.debug("Checkout successful")
@@ -334,7 +348,7 @@ def checkout(order_id: str):
     order_entry.order_status = Status.PENDING.value
     order_entry.payment_status = Status.PENDING.value
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        set_with_retry(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
 
@@ -375,8 +389,8 @@ def checkout(order_id: str):
     response_status_from_payment_service = payment_service_response["status"]
 
     if (
-        response_status_from_stock_service == 200
-        and response_status_from_payment_service == 200
+            response_status_from_stock_service == 200
+            and response_status_from_payment_service == 200
     ):
         order_entry.stock_status = Status.ACCEPTED.value
         order_entry.payment_status = Status.ACCEPTED.value
@@ -394,7 +408,7 @@ def checkout(order_id: str):
             # Payment was successful, but stock update has failed. Refund the user.
             rollback_payment_async(order_id, order_entry)
     try:
-        db.set(order_id, msgpack.encode(order_entry))
+        set_with_retry(order_id, msgpack.encode(order_entry))
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
 
