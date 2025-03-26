@@ -7,14 +7,19 @@ import pika
 import threading
 import redis
 import json
+import uuid
 
 from flask import Flask, jsonify, abort, Response
 import redis.exceptions
 
 DB_ERROR_STR = "DB error"
 STOCK_SERVICE_REQUESTS_QUEUE = os.environ["STOCK_SERVICE_REQUESTS_QUEUE"]
-ORDER_CHECKOUT_SAGA_REPLIES_QUEUE = os.environ["ORDER_CHECKOUT_SAGA_REPLIES_QUEUE"]
+MESSAGE_TTL = int(os.environ["MESSAGE_TTL"])
+DLX_EXCHANGE = os.environ["DLX_EXCHANGE"]
+DEAD_LETTER_STOCK_QUEUE = os.environ["DEAD_LETTER_STOCK_QUEUE"]
+STOCK_DLX_KEY = os.environ["STOCK_DLX_KEY"]
 RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
+
 
 app = Flask("stock-service")
 
@@ -29,6 +34,67 @@ db: redis.Redis = redis.Redis(
 def close_db_connection():
     db.close()
 
+revert_stock_update_script = '''
+    local log_id_to_find = ARGV[1]
+    local stream_key = "stock_update_log"
+
+    -- Step 1: Read recent entries from the stream (you can tweak the count for performance)
+    local entries = redis.pcall('XRANGE', stream_key, '-', '+')
+    if type(entries) == "table" and entries.err then
+        return {false, "stream_read_error", entries.err}
+    end
+
+    for _, entry in ipairs(entries) do
+        local entry_id = entry[1]
+        local fields = entry[2]
+
+        local found_log_id = nil
+        local items = nil
+        local quantities = nil
+
+        for i = 1, #fields, 2 do
+            local field_name = fields[i]
+            local field_value = fields[i+1]
+
+            if field_name == "log_id" then
+                found_log_id = field_value
+            elseif field_name == "items" then
+                items = field_value
+            elseif field_name == "quantities" then
+                quantities = field_value
+            end
+        end
+
+        -- Step 2: If we find the matching log_id, revert stock
+        if found_log_id == log_id_to_find then
+            local item_ids = {}
+            for id in string.gmatch(items, "([^,]+)") do
+                table.insert(item_ids, id)
+            end
+
+            local qty_list = {}
+            for qty in string.gmatch(quantities, "([^,]+)") do
+                table.insert(qty_list, tonumber(qty))
+            end
+
+            if #item_ids ~= #qty_list then
+                return {false, "log_data_malformed", log_id_to_find}
+            end
+
+            -- Step 3: Revert the stock updates
+            for i = 1, #item_ids do
+                local incr_reply = redis.pcall('HINCRBY', item_ids[i], 'stock', qty_list[i])
+                if type(incr_reply) == "table" and incr_reply.err then
+                    return {false, "error_reverting_stock", item_ids[i], incr_reply.err}
+                end
+            end
+
+            return {true, "revert_success", log_id_to_find}
+        end
+    end
+
+    return {false, "log_id_not_found", log_id_to_find}
+'''
 
 check_and_update_stock_script = """
     -- Phase 1: Check if there's enough stock for all items
@@ -67,32 +133,145 @@ check_and_update_stock_script = """
         end
     end
 
+    local log_id = ARGV[#ARGV]
+    local stream_key = "stock_update_log"
+    redis.pcall('XADD', stream_key, 'MAXLEN', '~', 10000, '*',
+        'log_id', log_id,
+        'items', table.concat(KEYS, ','),
+        'quantities', table.concat(ARGV, ',', 1, #KEYS)
+    )
+
     return {true, "success"}
 """
 
+
+find_log_ids_script = """
+    local log_id_1 = ARGV[1]
+    local log_id_2 = ARGV[2]
+    local stream_key = "stock_update_log"
+
+    local found_1 = false
+    local found_2 = false
+
+    local entries = redis.pcall('XRANGE', stream_key, '-', '+')
+    if type(entries) == "table" and entries.err then
+        return {false, "stream_read_error", entries.err}
+    end
+
+    for _, entry in ipairs(entries) do
+        local fields = entry[2]
+        for i = 1, #fields, 2 do
+            local field_name = fields[i]
+            local field_value = fields[i+1]
+
+            if field_name == "log_id" then
+                if field_value == log_id_1 then
+                    found_1 = true
+                elseif field_value == log_id_2 then
+                    found_2 = true
+                end
+            end
+        end
+
+        -- Early exit if both are found
+        if found_1 and found_2 then
+            break
+        end
+    end
+
+    return {
+        true,
+        {log_id_1, found_1},
+        {log_id_2, found_2}
+    }
+"""
+
 check_and_update_stock = db.register_script(check_and_update_stock_script)
+revert_stock_update_script = db.register_script(revert_stock_update_script)
+find_log_ids_script = db.register_script(find_log_ids_script)
 
 
 class RabbitMQHandler:
     def __init__(self):
         self.connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+        
         self.channel = self.connection.channel()
 
+        # Dead letter connection & channel
+        self.dlx_connection = pika.BlockingConnection(pika.URLParameters(RABBITMQ_HOST))
+        self.dlx_channel = self.dlx_connection.channel()
+
+
         # Declare queues
-        self.channel.queue_declare(queue=ORDER_CHECKOUT_SAGA_REPLIES_QUEUE)
-        self.channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE)
+        self.channel.exchange_declare(DLX_EXCHANGE, "direct")
+        
+        self.channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE, arguments={
+                "x-dead-letter-exchange": DLX_EXCHANGE, 
+                "x-dead-letter-routing-key": STOCK_DLX_KEY,
+                "x-message-ttl": MESSAGE_TTL * 10000
+        })
+
+        self.dlx_channel.queue_declare(DEAD_LETTER_STOCK_QUEUE)
+        self.dlx_channel.queue_bind(DEAD_LETTER_STOCK_QUEUE, DLX_EXCHANGE, STOCK_DLX_KEY)
+
+        
+
+    def dead_callback(self, ch, method, properties, body):
+        message = json.loads(body.decode())
+        order_id = message["order_id"]
+        log_id = message["log_id"]
+        order_items_quantities = message["items"]
+        order_type = message["type"]
+        
+        keys = list(order_items_quantities.keys())
+        args = list(order_items_quantities.values()) + [str(uuid.uuid4())]
+        
+        if order_type == 'compensation':
+            target_entry_log = message.get("target_entry_log")
+            if target_entry_log:
+                result = find_log_ids_script(args=[log_id, target_entry_log])
+                if result[0] and not result[2][1]:
+                    app.logger.debug(f"There is no target entry for the rollback and so it will be droped")
+                    self.dlx_channel.basic_ack(delivery_tag=method.delivery_tag)
+                    return
+            else:
+                result = find_log_ids_script(args=[log_id, ""])
+            
+            if not result[0]:
+                app.logger.debug(f"And error occurred with the database")
+            else:
+                if not result[1][1]:
+                    rollback_result = check_and_update_stock(keys, args)
+                    app.logger.debug(f"Rollback reattempted: {rollback_result}")
+                else:
+                    app.logger.debug(f"The target entry has been already rolled back so the request will be droped")
+        else:
+            result = revert_stock_update_script(args=[log_id])
+            app.logger.debug(f"Reverting an entry in the database: {result}")
+
+        self.dlx_channel.basic_ack(delivery_tag=method.delivery_tag)
+
 
     def callback(self, ch, method, properties, body):
         """Callback function to process messages from RabbitMQ queue."""
         # Expected message type: {'item_id': id, 'quantity': n, ...}.
         message = json.loads(body.decode())
         order_id = message["order_id"]
+        log_id = message["log_id"]
         order_items_quantities = message["items"]
         order_type = message["type"]
+        if method.redelivered:
+            self.channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
+            return
+        ### Crash before an action happens happens
+        # os._exit(1)
 
+        ### Crash before a rollback happens
+        # if order_type == "compensation":
+        #     os._exit(1)
         keys = list(order_items_quantities.keys())
-        args = list(order_items_quantities.values()) + [order_id]
-
+        args = list(order_items_quantities.values()) + [log_id]
+        
         try:
             result = check_and_update_stock(keys, args)
         except redis.exceptions.ConnectionError as e:
@@ -107,14 +286,17 @@ class RabbitMQHandler:
                 400,
                 order_id,
             )
+            self.channel.basic_ack(delivery_tag=method.delivery_tag)
             return
-
+        
         status_of_result = result[0]
 
         if status_of_result:
             # In case there was enough stock for the entire order, then publish SUCCESS
             # message to the Order Checkout saga replies queue.
             if order_type == "action":
+                ### Crash after an action has been made
+                # os._exit(1)
                 response_message = (
                     f"For order {order_id}, stock was successfully updated."
                 )
@@ -132,6 +314,8 @@ class RabbitMQHandler:
                 app.logger.debug(
                     f"For order {order_id}, the stock was rolled back successfully."
                 )
+                ### Crash after a rollback has happened
+                # os._exit(1)
         else:
             # Handle different error cases.
             error_type = result[1]
@@ -167,6 +351,7 @@ class RabbitMQHandler:
                 400,
                 order_id,
             )
+        self.channel.basic_ack(delivery_tag=method.delivery_tag)
 
     def publish_message(
         self,
@@ -191,7 +376,6 @@ class RabbitMQHandler:
                 properties=pika.BasicProperties(correlation_id=props.correlation_id),
                 body=json.dumps(response),
             )
-            self.channel.basic_ack(delivery_tag=method.delivery_tag)
         else:
             self.channel.basic_publish(
                 exchange="",
@@ -208,8 +392,16 @@ class RabbitMQHandler:
         self.channel.start_consuming()
         app.logger.debug("Started listening to stock service requests...")
 
+    def start_dead_consuming(self):
+        self.dlx_channel.basic_consume(
+            queue=DEAD_LETTER_STOCK_QUEUE, on_message_callback=self.dead_callback
+        )
+        app.logger.debug("Started listening to dead letter queue...")
+        self.dlx_channel.start_consuming()
+    
     def close_connection(self):
         self.connection.close()
+        self.dlx_connection.close()
 
 
 def decode_redis(src):
@@ -248,10 +440,16 @@ rabbitmq_handler = RabbitMQHandler()
 def start_consumer():
     rabbitmq_handler.start_consuming()
 
+def start_dead_consumer():
+    rabbitmq_handler.start_dead_consuming()
+
 
 # Start RabbitMQ Consumer in a separate thread.
 consumer_thread = threading.Thread(target=start_consumer, daemon=True)
+dlq_consumer_thread = threading.Thread(target=start_dead_consumer, daemon=True)
+
 consumer_thread.start()
+dlq_consumer_thread.start()
 
 
 @app.post("/item/create/<price>")
@@ -321,6 +519,11 @@ atexit.register(close_db_connection)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:
+    import logging
+
     gunicorn_logger = logging.getLogger("gunicorn.error")
-    app.logger.handlers = gunicorn_logger.handlers
-    app.logger.setLevel(gunicorn_logger.level)
+    if gunicorn_logger.handlers:
+        # Copy Gunicorn's handlers to Flask's app.logger
+        for handler in gunicorn_logger.handlers:
+            app.logger.addHandler(handler)
+    app.logger.setLevel(logging.DEBUG)  # or gunicorn_logger.level
