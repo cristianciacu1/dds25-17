@@ -183,45 +183,53 @@ class RabbitMQHandler:
         self.channel.exchange_declare(DLX_EXCHANGE, "direct")
 
         self.channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE, arguments={
-                "x-dead-letter-exchange": DLX_EXCHANGE, 
-                "x-dead-letter-routing-key": PAYMENT_DLX_KEY,
-                "x-message-ttl": MESSAGE_TTL * 10000
+            "x-dead-letter-exchange": DLX_EXCHANGE,
+            "x-dead-letter-routing-key": PAYMENT_DLX_KEY,
+            "x-message-ttl": MESSAGE_TTL * 10000
         })
 
         self.dlx_channel.queue_declare(DEAD_LETTER_PAYMENT_QUEUE)
-        self.dlx_channel.queue_bind(DEAD_LETTER_PAYMENT_QUEUE, DLX_EXCHANGE, PAYMENT_DLX_KEY)
+        self.dlx_channel.queue_bind(
+            DEAD_LETTER_PAYMENT_QUEUE,
+            DLX_EXCHANGE,
+            PAYMENT_DLX_KEY
+        )
 
     def dead_callback(self, ch, method, properties, body):
         message = json.loads(body.decode())
         user_id = message["user_id"]
         amount = message["total_cost"]
-        order_id = message["order_id"]
         order_type = message["type"]
         log_id = message["log_id"]
-        
-        
+
         keys = list(user_id)
         args = [amount, str(uuid.uuid4())]
-        
+
         if order_type == 'compensation':
             target_entry_log = message.get("target_entry_log")
             if target_entry_log:
                 result = find_log_ids_script(args=[log_id, target_entry_log])
                 if result[0] and not result[2][1]:
-                    app.logger.debug(f"There is no target entry for the rollback and so it will be droped")
+                    app.logger.debug(
+                        "There is no target entry for the rollback"
+                        "and so it will be droped"
+                    )
                     self.dlx_channel.basic_ack(delivery_tag=method.delivery_tag)
                     return
             else:
                 result = find_log_ids_script(args=[log_id, ""])
-            
+
             if not result[0]:
-                app.logger.debug(f"And error occurred with the database")
+                app.logger.debug("And error occurred with the database")
             else:
                 if not result[1][1]:
                     rollback_result = check_and_charge_user(keys, args)
                     app.logger.debug(f"Rollback reattempted: {rollback_result}")
                 else:
-                    app.logger.debug(f"The target entry has been already rolled back so the request will be droped")
+                    app.logger.debug(
+                        "The target entry has been already rolled back"
+                        "so the request will be droped"
+                    )
         else:
             result = revert_payment_update_script(args=[log_id])
             app.logger.debug(f"Reverting an entry in the database: {result}")
@@ -242,11 +250,11 @@ class RabbitMQHandler:
             self.channel.basic_nack(delivery_tag=method.delivery_tag, requeue=False)
             return
 
-        ### Crash before an action happens happens
+        # Crash before an action happens happens
         # os._exit(1)
 
-        ### Crash before a rollback happens
-        #if order_type == "compensation":
+        # Crash before a rollback happens
+        # if order_type == "compensation":
         #    os._exit(1)
 
         try:
@@ -271,7 +279,7 @@ class RabbitMQHandler:
             # If successful and a saga action was performed then publish SUCCESS
             # event to the order checkout saga replies queue.
             if order_type == "action":
-                ### Crash after an action has been made
+                # Crash after an action has been made
                 # os._exit(1)
                 self.publish_message(
                     method,
@@ -290,7 +298,7 @@ class RabbitMQHandler:
                     f"For order {order_id}, the user {user_id} was refunded "
                     + "successfully."
                 )
-                ### Crash after a rollback has happened
+                # Crash after a rollback has happened
                 # os._exit(1)
         else:
             # Handle different error cases.
@@ -414,6 +422,7 @@ rabbitmq_handler = RabbitMQHandler()
 def start_consumer():
     rabbitmq_handler.start_consuming()
 
+
 def start_dead_consumer():
     rabbitmq_handler.start_dead_consuming()
 
@@ -482,8 +491,6 @@ atexit.register(close_db_connection)
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:
-    import logging
-
     gunicorn_logger = logging.getLogger("gunicorn.error")
     if gunicorn_logger.handlers:
         # Copy Gunicorn's handlers to Flask's app.logger

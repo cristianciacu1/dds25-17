@@ -55,6 +55,7 @@ finalize_checkout = """
 initialize_checkout = db.register_script(initialize_checkout)
 finalize_checkout = db.register_script(finalize_checkout)
 
+
 def close_db_connection():
     db.close()
 
@@ -68,12 +69,14 @@ class OrderValue(Struct):
     user_id: str
     total_cost: int
 
+
 class LogInfo(Struct):
     order_id: str
     stock_log: str
     stock_rollback_log: str
     payment_log: str
     payment_rollback_log: str
+
 
 def generate_log_info(order_id: str) -> LogInfo:
     return LogInfo(
@@ -84,13 +87,16 @@ def generate_log_info(order_id: str) -> LogInfo:
         payment_rollback_log=str(uuid.uuid4())
     )
 
+
 class Status(Enum):
     IDLE = 0
     PENDING = 1
     ACCEPTED = 2
     REJECTED = 3
 
+
 replica_id = socket.gethostname()
+
 
 class RabbitMQHandler:
     def __init__(self):
@@ -145,8 +151,8 @@ def get_log_info_from_db() -> LogInfo | None:
         return None
     # deserialize data if it exists else return null
     entry: OrderValue | None = msgpack.decode(entry, type=LogInfo) if entry else None
-    
     return entry
+
 
 def get_order_from_db_no_abort(order_id: str) -> OrderValue | None:
     try:
@@ -155,7 +161,6 @@ def get_order_from_db_no_abort(order_id: str) -> OrderValue | None:
         return None
     # deserialize data if it exists else return null
     entry: OrderValue | None = msgpack.decode(entry, type=OrderValue) if entry else None
-    
     return entry
 
 
@@ -196,7 +201,11 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
         send_post_request(f"{GATEWAY_URL}/stock/add/{item_id}/{quantity}")
 
 
-def rollback_stock_async(order_id: str, items: list[tuple[str, int]], log_info: LogInfo):
+def rollback_stock_async(
+        order_id: str,
+        items: list[tuple[str, int]],
+        log_info: LogInfo
+):
     """Publish a rollback stock event to the Stock Service Queue."""
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in items:
@@ -218,7 +227,11 @@ def rollback_stock_async(order_id: str, items: list[tuple[str, int]], log_info: 
     )
 
 
-def rollback_payment_async(order_id: str, order_entry: OrderValue, log_info:LogInfo):
+def rollback_payment_async(
+        order_id: str,
+        order_entry: OrderValue,
+        log_info: LogInfo
+):
     """Publish refund user event to the Payment Service Queue."""
     payment_service_message = {
         "user_id": order_entry.user_id,
@@ -389,7 +402,7 @@ def checkout(order_id: str):
             + "request is aborted.",
             status=400,
         )
-    
+
     if order_entry.order_status != Status.IDLE.value:
         app.logger.debug(
             f"The process of checking out order {order_id} has FINISHED. This "
@@ -411,11 +424,14 @@ def checkout(order_id: str):
     order_entry.payment_status = Status.PENDING.value
     try:
         # db.set(order_id, msgpack.encode(order_entry))
-        initialize_checkout(keys=[order_id, replica_id], args=[msgpack.encode(order_entry), msgpack.encode(log_info)])
+        initialize_checkout(
+            keys=[order_id, replica_id],
+            args=[msgpack.encode(order_entry), msgpack.encode(log_info)]
+        )
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
 
-    #### Crash before anything was done
+    # Crash before anything was done
     # os._exit(1)
 
     # get the quantity per item.
@@ -434,29 +450,32 @@ def checkout(order_id: str):
         stock_service_response = rabbitmq_handler.call(
             STOCK_SERVICE_REQUESTS_QUEUE, stock_service_message
         )
-    except TimeoutError as e:
+    except TimeoutError:
         app.logger.error(f"Stock service RPC timed out for order {order_id}")
-        
+
         order_entry.stock_status = Status.IDLE.value
         order_entry.order_status = Status.IDLE.value
         order_entry.payment_status = Status.IDLE.value
         try:
             # db.set(order_id, msgpack.encode(order_entry))
-            finalize_checkout(keys=[order_id, replica_id], args=[msgpack.encode(order_entry)])
+            finalize_checkout(
+                keys=[order_id, replica_id],
+                args=[msgpack.encode(order_entry)]
+            )
         except redis.exceptions.RedisError:
             return abort(400, DB_ERROR_STR)
 
         return Response("Stock service did not respond in time.", status=504)
-    
+
     response_status_from_stock_service = stock_service_response["status"]
-    
+
     app.logger.debug(
         f"Stock Service replied to the subtract stock action for order {order_id}."
     )
 
-    ### Crash when only the stock has been updated
+    # Crash when only the stock has been updated
     # os._exit(1)
-    
+
     # Send charge user event to the Payment Service via RPC and wait until it replies.
     payment_service_message = {
         "user_id": order_entry.user_id,
@@ -465,33 +484,35 @@ def checkout(order_id: str):
         "order_id": order_id,
         "type": "action",
     }
-    
+
     try:
         payment_service_response = rabbitmq_handler.call(
             PAYMENT_SERVICE_REQUESTS_QUEUE, payment_service_message
         )
-    except TimeoutError as e:
+    except TimeoutError:
         app.logger.error(f"Payment service RPC timed out for order {order_id}")
-        
+
         if response_status_from_stock_service == 200:
             rollback_stock_async(order_id, order_entry.items, log_info)
-        
+
         order_entry.stock_status = Status.IDLE.value
         order_entry.order_status = Status.IDLE.value
         order_entry.payment_status = Status.IDLE.value
         try:
             # db.set(order_id, msgpack.encode(order_entry))
-            finalize_checkout(keys=[order_id, replica_id], args=[msgpack.encode(order_entry)])
+            finalize_checkout(
+                keys=[order_id, replica_id],
+                args=[msgpack.encode(order_entry)]
+            )
         except redis.exceptions.RedisError:
             return abort(400, DB_ERROR_STR)
         return Response("Payment service did not respond in time.", status=504)
 
     app.logger.debug(
-            f"Payment Service replied to the charge user action for order {order_id}."
-        )
+        f"Payment Service replied to the charge user action for order {order_id}."
+    )
     response_status_from_payment_service = payment_service_response["status"]
-    
-    ### Crash when both the stock and payment have been updated but no rollback
+    # Crash when both the stock and payment have been updated but no rollback
     # os._exit(1)
 
     if (
@@ -514,11 +535,14 @@ def checkout(order_id: str):
             # Payment was successful, but stock update has failed. Refund the user.
             rollback_payment_async(order_id, order_entry, log_info)
 
-        ### Crash after the rollbacks
+        # Crash after the rollbacks
         # os._exit(1)
     try:
         # db.set(order_id, msgpack.encode(order_entry))
-        finalize_checkout(keys=[order_id, replica_id], args=[msgpack.encode(order_entry)])
+        finalize_checkout(
+            keys=[order_id, replica_id],
+            args=[msgpack.encode(order_entry)]
+        )
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
 
@@ -537,6 +561,7 @@ def checkout(order_id: str):
 atexit.register(close_db_connection)
 # atexit.register(rabbitmq_handler.close_connection)
 
+
 def check_for_failed_processes():
     app.logger.info(f"Running custom startup code under Gunicorn, replica:{replica_id}")
     log_info = get_log_info_from_db()
@@ -549,15 +574,15 @@ def check_for_failed_processes():
             f"payment_rollback_log: {log_info.payment_rollback_log}"
         )
         order_entry: OrderValue = get_order_from_db_no_abort(log_info.order_id)
-        
+
         if not order_entry:
             return
-        
+
         items_quantities: dict[str, int] = defaultdict(int)
-        
+
         for item_id, quantity in order_entry.items:
             items_quantities[item_id] -= quantity
-        
+
         stock_service_message = {
             "items": items_quantities,
             "log_id": log_info.stock_rollback_log,
@@ -565,7 +590,7 @@ def check_for_failed_processes():
             "order_id": log_info.order_id,
             "type": "compensation",
         }
-        
+
         rabbitmq_handler.channel.basic_publish(
             exchange=DLX_EXCHANGE,
             routing_key=STOCK_DLX_KEY,
@@ -591,9 +616,12 @@ def check_for_failed_processes():
         order_entry.order_status = Status.IDLE.value
         order_entry.payment_status = Status.IDLE.value
 
-        finalize_checkout(keys=[log_info.order_id, replica_id], args=[msgpack.encode(order_entry)])
+        finalize_checkout(
+            keys=[log_info.order_id, replica_id],
+            args=[msgpack.encode(order_entry)]
+        )
     else:
-        app.logger.info(f"There is no unfinished process")
+        app.logger.info("There is no unfinished process")
 
 
 if __name__ == "__main__":
