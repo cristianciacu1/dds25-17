@@ -73,7 +73,7 @@ batch_update_user_script = """
     end
 """
 
-revert_payment_update_script = '''
+revert_payment_update_script = """
     local log_id_to_find = ARGV[1]
     local stream_key = "payment_update_log"
 
@@ -121,7 +121,7 @@ revert_payment_update_script = '''
     end
 
     return {false, "log_id_not_found", log_id_to_find}
-'''
+"""
 
 find_log_ids_script = """
     local log_id_1 = ARGV[1]
@@ -182,17 +182,18 @@ class RabbitMQHandler:
         # Declare queues
         self.channel.exchange_declare(DLX_EXCHANGE, "direct")
 
-        self.channel.queue_declare(queue=PAYMENT_SERVICE_REQUESTS_QUEUE, arguments={
-            "x-dead-letter-exchange": DLX_EXCHANGE,
-            "x-dead-letter-routing-key": PAYMENT_DLX_KEY,
-            "x-message-ttl": MESSAGE_TTL * 10000
-        })
+        self.channel.queue_declare(
+            queue=PAYMENT_SERVICE_REQUESTS_QUEUE,
+            arguments={
+                "x-dead-letter-exchange": DLX_EXCHANGE,
+                "x-dead-letter-routing-key": PAYMENT_DLX_KEY,
+                "x-message-ttl": MESSAGE_TTL * 10000,
+            },
+        )
 
         self.dlx_channel.queue_declare(DEAD_LETTER_PAYMENT_QUEUE)
         self.dlx_channel.queue_bind(
-            DEAD_LETTER_PAYMENT_QUEUE,
-            DLX_EXCHANGE,
-            PAYMENT_DLX_KEY
+            DEAD_LETTER_PAYMENT_QUEUE, DLX_EXCHANGE, PAYMENT_DLX_KEY
         )
 
     def dead_callback(self, ch, method, properties, body):
@@ -205,7 +206,7 @@ class RabbitMQHandler:
         keys = list(user_id)
         args = [amount, str(uuid.uuid4())]
 
-        if order_type == 'compensation':
+        if order_type == "compensation":
             target_entry_log = message.get("target_entry_log")
             if target_entry_log:
                 result = find_log_ids_script(args=[log_id, target_entry_log])
@@ -492,8 +493,5 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
-    if gunicorn_logger.handlers:
-        # Copy Gunicorn's handlers to Flask's app.logger
-        for handler in gunicorn_logger.handlers:
-            app.logger.addHandler(handler)
-    app.logger.setLevel(logging.DEBUG)  # or gunicorn_logger.level
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)

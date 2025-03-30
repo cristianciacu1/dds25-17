@@ -34,7 +34,7 @@ def close_db_connection():
     db.close()
 
 
-revert_stock_update_script = '''
+revert_stock_update_script = """
     local log_id_to_find = ARGV[1]
     local stream_key = "stock_update_log"
 
@@ -94,7 +94,7 @@ revert_stock_update_script = '''
     end
 
     return {false, "log_id_not_found", log_id_to_find}
-'''
+"""
 
 check_and_update_stock_script = """
     -- Phase 1: Check if there's enough stock for all items
@@ -212,15 +212,19 @@ class RabbitMQHandler:
         # Declare queues
         self.channel.exchange_declare(DLX_EXCHANGE, "direct")
 
-        self.channel.queue_declare(queue=STOCK_SERVICE_REQUESTS_QUEUE, arguments={
-            "x-dead-letter-exchange": DLX_EXCHANGE,
-            "x-dead-letter-routing-key": STOCK_DLX_KEY,
-            "x-message-ttl": MESSAGE_TTL * 10000
-        })
+        self.channel.queue_declare(
+            queue=STOCK_SERVICE_REQUESTS_QUEUE,
+            arguments={
+                "x-dead-letter-exchange": DLX_EXCHANGE,
+                "x-dead-letter-routing-key": STOCK_DLX_KEY,
+                "x-message-ttl": MESSAGE_TTL * 10000,
+            },
+        )
 
         self.dlx_channel.queue_declare(DEAD_LETTER_STOCK_QUEUE)
-        self.dlx_channel.queue_bind(DEAD_LETTER_STOCK_QUEUE,
-                                    DLX_EXCHANGE, STOCK_DLX_KEY)
+        self.dlx_channel.queue_bind(
+            DEAD_LETTER_STOCK_QUEUE, DLX_EXCHANGE, STOCK_DLX_KEY
+        )
 
     def dead_callback(self, ch, method, properties, body):
         message = json.loads(body.decode())
@@ -231,7 +235,7 @@ class RabbitMQHandler:
         keys = list(order_items_quantities.keys())
         args = list(order_items_quantities.values()) + [str(uuid.uuid4())]
 
-        if order_type == 'compensation':
+        if order_type == "compensation":
             target_entry_log = message.get("target_entry_log")
             if target_entry_log:
                 result = find_log_ids_script(args=[log_id, target_entry_log])
@@ -531,8 +535,5 @@ if __name__ == "__main__":
     app.run(host="0.0.0.0", port=8000, debug=True)
 else:
     gunicorn_logger = logging.getLogger("gunicorn.error")
-    if gunicorn_logger.handlers:
-        # Copy Gunicorn's handlers to Flask's app.logger
-        for handler in gunicorn_logger.handlers:
-            app.logger.addHandler(handler)
-    app.logger.setLevel(logging.DEBUG)  # or gunicorn_logger.level
+    app.logger.handlers = gunicorn_logger.handlers
+    app.logger.setLevel(gunicorn_logger.level)

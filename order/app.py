@@ -84,7 +84,7 @@ def generate_log_info(order_id: str) -> LogInfo:
         stock_log=str(uuid.uuid4()),
         stock_rollback_log=str(uuid.uuid4()),
         payment_log=str(uuid.uuid4()),
-        payment_rollback_log=str(uuid.uuid4())
+        payment_rollback_log=str(uuid.uuid4()),
     )
 
 
@@ -95,6 +95,7 @@ class Status(Enum):
     REJECTED = 3
 
 
+# Replica id is a unique identifier that helps differentiate between different replicas
 replica_id = socket.gethostname()
 
 
@@ -202,11 +203,10 @@ def rollback_stock(removed_items: list[tuple[str, int]]):
 
 
 def rollback_stock_async(
-        order_id: str,
-        items: list[tuple[str, int]],
-        log_info: LogInfo
+    order_id: str, items: list[tuple[str, int]], log_info: LogInfo
 ):
     """Publish a rollback stock event to the Stock Service Queue."""
+    # Send the log_id of the stock rollback operation
     items_quantities: dict[str, int] = defaultdict(int)
     for item_id, quantity in items:
         items_quantities[item_id] -= quantity
@@ -227,12 +227,9 @@ def rollback_stock_async(
     )
 
 
-def rollback_payment_async(
-        order_id: str,
-        order_entry: OrderValue,
-        log_info: LogInfo
-):
+def rollback_payment_async(order_id: str, order_entry: OrderValue, log_info: LogInfo):
     """Publish refund user event to the Payment Service Queue."""
+    # Send the log_id of the payment rollback operation
     payment_service_message = {
         "user_id": order_entry.user_id,
         "total_cost": -order_entry.total_cost,
@@ -414,19 +411,30 @@ def checkout(order_id: str):
             status=400,
         )
 
-    # Update the status of all three steps to PENDING, indicating that the checkout
-    # procedure was initiated.
+    # Generate log_info to retrieve the log IDs for all possible operations.
+    # There are 4 possible operations: a transaction and a rollback for each service.
+    # For this reason log_info has 4 fields.
+    # It's important to generate these in advance and store them in the database,
+    # rather than generating them on the fly, so that the service can check for
+    # any incomplete transactions in the event of a system failure.
 
     log_info = generate_log_info(order_id)
+
+    # Update the status of all three steps to PENDING, indicating that the checkout
+    # procedure was initiated.
 
     order_entry.stock_status = Status.PENDING.value
     order_entry.order_status = Status.PENDING.value
     order_entry.payment_status = Status.PENDING.value
     try:
-        # db.set(order_id, msgpack.encode(order_entry))
+        # Here we initialize the logging process.
+        # Once we update the status of the order we save to the database the log ids
+        # of the possible operations. replica_id is utilized as a key to  differentiate
+        # between processes of diffrent replicas. So that a newly restarted replica
+        # cannot mistake other ongoing processes as though they have crashed
         initialize_checkout(
             keys=[order_id, replica_id],
-            args=[msgpack.encode(order_entry), msgpack.encode(log_info)]
+            args=[msgpack.encode(order_entry), msgpack.encode(log_info)],
         )
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -440,6 +448,7 @@ def checkout(order_id: str):
         items_quantities[item_id] += quantity
 
     # Send subtract stock event to the Stock Service via RPC and wait until it replies.
+    # Also send the log_id of the stock transaction
     stock_service_message = {
         "order_id": order_id,
         "log_id": log_info.stock_log,
@@ -457,10 +466,11 @@ def checkout(order_id: str):
         order_entry.order_status = Status.IDLE.value
         order_entry.payment_status = Status.IDLE.value
         try:
-            # db.set(order_id, msgpack.encode(order_entry))
+            # Once we decide on the outcome of the order
+            # The entry of log_info in the database is deleted
+            # Meaning that there is no longer an ongoing process in this replica
             finalize_checkout(
-                keys=[order_id, replica_id],
-                args=[msgpack.encode(order_entry)]
+                keys=[order_id, replica_id], args=[msgpack.encode(order_entry)]
             )
         except redis.exceptions.RedisError:
             return abort(400, DB_ERROR_STR)
@@ -477,6 +487,7 @@ def checkout(order_id: str):
     # os._exit(1)
 
     # Send charge user event to the Payment Service via RPC and wait until it replies.
+    # Also send the log_id of the payment transaction
     payment_service_message = {
         "user_id": order_entry.user_id,
         "total_cost": order_entry.total_cost,
@@ -499,10 +510,11 @@ def checkout(order_id: str):
         order_entry.order_status = Status.IDLE.value
         order_entry.payment_status = Status.IDLE.value
         try:
-            # db.set(order_id, msgpack.encode(order_entry))
+            # Once we decide on the outcome of the order
+            # The entry of log_info in the database is deleted
+            # Meaning that there is no longer an ongoing process in this replica
             finalize_checkout(
-                keys=[order_id, replica_id],
-                args=[msgpack.encode(order_entry)]
+                keys=[order_id, replica_id], args=[msgpack.encode(order_entry)]
             )
         except redis.exceptions.RedisError:
             return abort(400, DB_ERROR_STR)
@@ -538,10 +550,11 @@ def checkout(order_id: str):
         # Crash after the rollbacks
         # os._exit(1)
     try:
-        # db.set(order_id, msgpack.encode(order_entry))
+        # Once we decide on the outcome of the order
+        # The entry of log_info in the database is deleted
+        # Meaning that there is no longer an ongoing process in this replica
         finalize_checkout(
-            keys=[order_id, replica_id],
-            args=[msgpack.encode(order_entry)]
+            keys=[order_id, replica_id], args=[msgpack.encode(order_entry)]
         )
     except redis.exceptions.RedisError:
         return abort(400, DB_ERROR_STR)
@@ -563,6 +576,25 @@ atexit.register(close_db_connection)
 
 
 def check_for_failed_processes():
+    """
+    Checks the database for any unfinished or failed processes (orders), and triggers
+    compensation steps if needed.
+
+    This function:
+        1. Retrieves the most recent log entry from the database
+            (it utilizes socketname as replica_id in order
+            to check for its own failed processes).
+        2. If an unfinished process is found:
+           - Attempts to load the corresponding order data.
+           - Publishes "compensation" messages to the stock and payment services
+             via RabbitMQ for rollback.
+           - Resets the order statuses to 'IDLE'.
+           - Finalizes checkout by updating the order in the database.
+        3. If no unfinished process is found, logs that nothing needs handling.
+
+    Returns:
+        None
+    """
     app.logger.info(f"Running custom startup code under Gunicorn, replica:{replica_id}")
     log_info = get_log_info_from_db()
     if log_info:
@@ -582,6 +614,9 @@ def check_for_failed_processes():
 
         for item_id, quantity in order_entry.items:
             items_quantities[item_id] -= quantity
+
+        # target entry log is utilized so that stock does not rollback
+        # an unexisting update to the stock/payment.
 
         stock_service_message = {
             "items": items_quantities,
@@ -617,8 +652,7 @@ def check_for_failed_processes():
         order_entry.payment_status = Status.IDLE.value
 
         finalize_checkout(
-            keys=[log_info.order_id, replica_id],
-            args=[msgpack.encode(order_entry)]
+            keys=[log_info.order_id, replica_id], args=[msgpack.encode(order_entry)]
         )
     else:
         app.logger.info("There is no unfinished process")
