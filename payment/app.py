@@ -58,7 +58,7 @@ check_and_charge_user_script = """
 
 batch_update_user_script = """
     for i=1, #KEYS do
-        redis.pcall('HSET', tostring(i-1), 'credit', ARGV[0])
+        redis.pcall('HSET', tostring(i-1), 'credit', ARGV[1])
     end
 """
 
