@@ -1,0 +1,4 @@
+Cristian Ciacu: code architecture, documentation, added distributed locks (obsolete), migrated to server-side scripts (using Lua), researched other gateways and employed Envoy, ran stress/consistency tests, optimized SAGA logic
+Elena Dumitrescu: code architecture, documentation, implemented Redis Sentinel (obsolete), migrated to server-side scripts (using Lua), ran stress/consistency tests, improved latency of batch inits, implemented RabbitMQ consumers for Stock and Order services, optimized SAGA logic 
+Radu Nicolae: code architecture, fault tolerance, documentation, ran stress/consistency tests, optimized SAGA logic
+Vian Robotin: code architecture, documentation, implemented the first version of the SAGA pattern, migrated to server-side scripts (using Lua), ran stress/consistency tests, fixed various bugs, implemented RabbitMQ consumers for Payment services.
