@@ -31,7 +31,6 @@ PAYMENT_DLX_KEY = os.environ["PAYMENT_DLX_KEY"]
 RABBITMQ_HOST = os.environ["RABBITMQ_URL"]
 
 app = Flask("order-service")
-app.logger.setLevel(logging.DEBUG)
 
 db: redis.Redis = redis.Redis(
     host=os.environ["REDIS_HOST"],

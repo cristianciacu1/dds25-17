@@ -147,7 +147,7 @@ check_and_update_stock_script = """
 
 batch_update_stock_script = """
     for i=1, #KEYS do
-        redis.pcall('HSET', tostring(i-1), 'stock', ARGV[0], 'price', ARGV[1])
+        redis.pcall('HSET', tostring(i-1), 'stock', ARGV[1], 'price', ARGV[2])
     end
 """
 
