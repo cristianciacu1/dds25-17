@@ -388,27 +388,27 @@ def checkout(order_id: str):
 
     # If this order was already checked out (either in progress or completed), we
     # should avoid checking it out again.
-    if order_entry.order_status == Status.PENDING.value:
-        app.logger.debug(
-            f"The process of checking out order {order_id} has already started. This "
-            + "request is aborted."
-        )
-        return Response(
-            f"The process of checking out order {order_id} has already started. This "
-            + "request is aborted.",
-            status=400,
-        )
+    # if order_entry.order_status == Status.PENDING.value:
+    #     app.logger.debug(
+    #         f"The process of checking out order {order_id} has already started. This "
+    #         + "request is aborted."
+    #     )
+    #     return Response(
+    #         f"The process of checking out order {order_id} has already started. This "
+    #         + "request is aborted.",
+    #         status=400,
+    #     )
 
-    if order_entry.order_status != Status.IDLE.value:
-        app.logger.debug(
-            f"The process of checking out order {order_id} has FINISHED. This "
-            + "request is aborted."
-        )
-        return Response(
-            f"The process of checking out order {order_id} has FINISHED. This "
-            + "request is aborted.",
-            status=400,
-        )
+    # if order_entry.order_status != Status.IDLE.value:
+    #     app.logger.debug(
+    #         f"The process of checking out order {order_id} has FINISHED. This "
+    #         + "request is aborted."
+    #     )
+    #     return Response(
+    #         f"The process of checking out order {order_id} has FINISHED. This "
+    #         + "request is aborted.",
+    #         status=400,
+    #     )
 
     # Generate log_info to retrieve the log IDs for all possible operations.
     # There are 4 possible operations: a transaction and a rollback for each service.
